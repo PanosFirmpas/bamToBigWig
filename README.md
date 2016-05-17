@@ -6,7 +6,7 @@ and then computes the signal with single base resolution and directly outputs
 a wiggle file to a wigToBigWig process that runs in the background.
 
 # Installing
-### Test
+*1 ### Test
 
 
 sfsd
