@@ -3,9 +3,10 @@ Directly create a bigwig file with signal derived from a sorted and indexed bam 
 
 This script uses pysam to read the input bam file, filters and shifts the reads,
 and then computes the signal with single base resolution and directly outputs
-a wiggle file to a wigToBigWig process that runs in the background.
+a wiggle file to a wigToBigWig process that runs in the background. It
+should run significantly faster than indirect approaches since it is parallelizeable
+while skipping any intermediate conversions between file types.
 
-It should work with all python versions.
 ## Installation
 First of all, try this:
 ```sh
@@ -19,7 +20,7 @@ If that does't work, here are more details on installing:
 *  **Python libraries**
     
     bamToBigWig is a python script, so you will need a working installation of python, thankfully most operating systems these days come with python already installed so this should't be a problem.
-    *    [pysam](https://github.com/pysam-developers/pysam) is used to read the input bam file, to install it follow the instructions in the project's page.
+    *    [pysam](https://github.com/pysam-developers/pysam) is used to read the input bam file, to install it follow the instructions in the project's page. Any python version should work.
     *    [numpy](http://www.scipy.org/scipylib/download.html) is also needed and needs to be installed.
             ```sh
             $ pip install numpy
@@ -72,56 +73,37 @@ The path to the output .bw file. If not given, it will be set to /path/to/input(
 #####  -q,--q
 Only include reads with mapping quality >= this option. Default is None, no q filter is applied.
 #####  -f,--filter_lc
-Only include reads with all bits of this argument set in their flag. Default is None,no read filter is applied.
+Only include reads with all bits of this argument set in their flag. Default is None,no read filter is applied.See [--explain_flags](https://github.com/PanosFirmpas/bamToBigWig#--explain_flags)
+#####  -F,--filter_uc
+Only include reads with none of the bits of this argument set in their flag. See [--explain_flags](https://github.com/PanosFirmpas/bamToBigWig#--explain_flags)
+#####  -tlu,--t_len_upper
+Sets filtering so that only reads with absolute(tlen) lower than this are accepted.
+This field is set by the mapper, so be careful. For paired-end DNA it will typically refer to the
+'fragment size', that is, the distance between the two cutting ends of each pair of reads. For ATAC experiments, setting this to approximately 120, will visualize the "nucleosome free" reads.  If you set this option, it is suggested to also set t_len_lower to at least 0 so that reads without a mate (tlen -1) get filtered out, alternatively, set an appropriate -F filter.  Default is "None", no fragment size filter is applied.
+#####  -tll,--t_len_lower
+Sets filtering so that only reads with absolute(tlen) greater than this are accepted. See also --t_len_upper
+##### -p,--procs
+The number of processors to use. Defaults to 4. Be advised that one of those processors with be consumed by the wigToBigWig process. After that, each available processor works on one chromosome at a time until all chromosomes are done.
+#####  -sh,--shift
+Arbitrary shift in bp. This value is used to move cutting ends (5') towards 5'->3'. If you want to
+extend the signal downstream of the original cutting end, for example to visualize CHIPseq experiments,
+you will want to leave this value to 0 and set --extsize to how much you want to extend. If on the
+other hand you want to extend the signal to both sides of the cutting end, for example if you are
+visualizing ATACseq or DNAse-seq, you will want to set this value. The default value -3 in combination
+with the default value of --extsize 7 will extend the signal by 3bp around the cutting end. 
 
-
-See --explain_flags')   
-    '-F','--filter_uc', 
-                       help='Only include reads with none of the bits of this argument set in their flag. See --explain_flags')
-
-    '-tll','--t_len_lower', 
-                       help='Sets filtering so that only reads with absolute(tlen) greater than this are accepted.\
-                       See also --t_len_upper')
-
-    '-tlu','--t_len_upper', 
-                       help='Sets filtering so that only reads with absolute(tlen) lower than this are accepted.\
-                       This field is set by the mapper, but for paired-end DNA it will typically refer to the\
-                       fragment size. For ATAC experiments, setting this to approximately 120, will visualize\
-                       the "nucleosome free" reads. Default is "None", no fragment size filter is applied.')
-
-    '-p','--procs', 
-                       help='The number of processors to use. Defaults to 4. Be advised that one of those\
-                       processors with be consumed by the wigToBigWig process. After that, each available\
-                       processor works on one chromosome at a time until all chromosomes are done.')
-
-    '-sh', '--shift', 
-                        help="arbitrary shift in bp. This value is used to move cutting ends (5') towards 5'->3'.\
-                        If you want to extend the signal downstream of the original cutting end,\
-                        for example to visualize CHIPseq experiments, you will want to leave this value to 0\
-                        and set --extsize to how much you want to extend. If on the other hand you want to\
-                        extend the signal to both sides of the cutting end, for example if you are visualizing\
-                        ATACseq or DNAse-seq, you will want to set this value.\
-                        The default value -3 in combination with the default value of --extsize 7\
-                        will extend the signal by 3bp around the cutting end.\
-                        NOTE: this is different than the ATAC-correction shift, and is applied on top of it.")
-
-    '-exts', '--extsize', 
-                        help="arbitrary extension size in bp. \
-                        This value is used to extend each read towards 3' end.\
-                        CAn be usefully combined with --shift. The default value is 7\
-                        which in combination with the default --shift -3 extends the signal\
-                        by 3bp upstream and downstream of the original cutting end.")
-
-    '-sh_p', '--shift_p', 
-                        help="Like --shift (and applied on top of it), but only applied to reads that map on the possitive strand.")
-
-    '-sh_n', '--shift_n', 
-                        help="Like --shift (and applied on top of it), but only applied to reads that map on the negative strand.")
-
-    '-atac', '--atac', action='store_true', default=True,
-                        help="shift reads mapping to the plus strand by +5 and reads that map\
-                        on the minus strand by -4. This centers the cutting ends on the center of the\
-                        transposase 'event'. Overwrites --shift_p to 5 and --shift_n to -4")
+#####  -exts,--extsize
+Arbitrary extension size in bp.This value is used to extend each read towards 3' end.
+CAn be usefully combined with --shift. The default value is 7 which in combination with the 
+default --shift -3 extends the signal by 3bp upstream and downstream of the original cutting end.
+#####  -sh_p,--shift_p
+Like --shift (and applied on top of it), but only applied to reads that map on the possitive strand. Default is 0.
+#####  -sh_n,--shift_n
+Like --shift (and applied on top of it), but only applied to reads that map on the negative strand.Default is 0.
+#####  -atac,--atac
+Shift reads mapping to the plus strand by +5 and reads that map
+on the minus strand by -4. This centers the cutting ends on the center of the
+transposase 'event'. Overwrites --shift_p to 5 and --shift_n to -4.
 
 
 
