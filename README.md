@@ -66,6 +66,23 @@ $ bamToBigWig --help
 ```
 
 Should be handy for on-the-spot help.
+
+```sh
+$ bamToBigWig -b input.bam -chr /home/user/chrominfo/mm20.txt -o output.bw -q 10 -f 2 -atac --
+```
+This command will read reads from input.bam, for all chromosomes in /home/user/chrominfo/mm20.txt,
+keep only the ones marked as "proper pair", correct the signal for an atac experiment and
+produce output.bw showing the signal of the ATAC cutting events, expanded three bases to each direction,
+thanks to the default options of --shift -3 --extsize 7.
+
+```sh
+$ bamToBigWig -b input.bam -chr /home/user/chrominfo/mm20.txt -o output.bw -q 10 -f 2 -atac -tlu 120
+```
+This command will additionally only use reads that mapped within 120bp from their mate. For an ATACseq experiment,
+these reads could be considered "nucleosome free" since the distance between them is too small to have
+contained an entire nucleosome, meaning they are more likely to have come from a nuceosome free region.
+
+
 ### The options
 #####  -b,--bam
 This us a required option and should be the path to the input .bam file.
