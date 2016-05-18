@@ -7,6 +7,9 @@ a wiggle file to a wigToBigWig process that runs in the background. It
 should run significantly faster than indirect approaches since it is parallelizeable
 while skipping any intermediate conversions between file types.
 
+[[https://github.com/PanosFirmpas/bamToBigWig/Drawing.png|alt=scl]]
+ Contact a human
+
 ## Installation
 First of all, try this:
 ```sh
