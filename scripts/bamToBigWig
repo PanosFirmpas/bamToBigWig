@@ -136,7 +136,7 @@ def generate_starts(args, chrom):
     
     d = {}
     for read in bam.fetch(reference=chrom):
-        if ff(read.flag) and fr(read.tlen) and fq(read.mapq):
+        if ff(read.flag) and ffr(read.tlen) and fq(read.mapq):
             if read.is_reverse:
                 d[read.aend + ns_C] = d.get(read.aend + ns_C, 0) + 1
             else:
@@ -225,7 +225,8 @@ def bamtobw(args):
     pool = Pool(args.procs -1 , initializer=init, initargs=(l,wtbw.stdin,))
 
     for message in pool.imap_unordered(one_worker, iterabull):
-        print(message)
+        # print(message)
+        pass
 
     pool.close()
     pool.join()
