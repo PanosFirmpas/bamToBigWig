@@ -213,6 +213,7 @@ def bamtobw(args):
     chroms = [x[0] for x in sorted(loc,reverse=True, key=lambda x: int(x[1]))]
 
     wtbw = subp.Popen(["wigToBigWig",
+                    "-clip",
                      "stdin",
                      args.chrominfo,
                      args.out],
