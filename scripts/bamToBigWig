@@ -33,6 +33,8 @@ from multiprocessing import Pool,Lock
 import pysam
 import numpy as np
 import argparse
+from itertools import islice
+
 
 
 def which(program):
@@ -110,8 +112,89 @@ class FragFilter():
         tlu = args.t_len_upper
         return lambda x: (x <= tlu)
 
-def generate_starts(args, chrom):
+# def generate_starts(args, chrom):
     
+#     bam = pysam.AlignmentFile(args.bam)
+    
+#     #ff is a function that gets instantiated based on
+#     #the arguments. It returns True for acceptable reads
+#     f = FlagFilter(args)
+#     ff = f.filter_func
+
+#     fr = FragFilter(args)
+#     ffr = fr.filter_func
+
+#     if args.q :
+#         fq = lambda x : x >= args.q 
+#     else :
+#         fq = lambda x: True
+    
+#     #p strand constant
+#     ps_C = args.shift + args.shift_p
+#     #n strand constant
+#     ns_C = - args.shift - args.shift_n - args.extsize
+
+    
+    
+#     d = {}
+#     for read in bam.fetch(reference=chrom):
+#         if ff(read.flag) and ffr(read.tlen) and fq(read.mapq):
+#             if read.is_reverse:
+#                 d[read.aend + ns_C] = d.get(read.aend + ns_C, 0) + 1
+#             else:
+#                 d[read.pos + ps_C] = d.get(read.pos + ps_C, 0) + 1
+    
+#     for kv in sorted(d.items()):
+#         yield kv
+
+# def one_worker_old((args, chrom)):
+    
+#     wlen = args.extsize
+#     starts = generate_starts(args, chrom)
+#     wzero = np.zeros(wlen, dtype=np.uint16)
+#     cline = "fixedStep  chrom={}  start={{}}  step=1\n".format(chrom)
+#     clinef = cline.format
+#     flushes = 0
+#     clines = []
+#     cvals = []
+
+    
+#     cpos,cval = starts.next()
+#     while cpos < 0:
+#         cpos,cval = starts.next()
+    
+#     w = wzero.copy() + cval
+#     clines.append( clinef(cpos + 1) )
+
+#     for pos,val in starts:
+#         step = pos - cpos
+#         if step >= wlen :
+#             sbuff += '\n'.join(w.astype(str)) + '\n'
+#             flushes += 1
+#             #try to empty sbuffer
+#             if flushes > 100:
+#                 getlock = lock.acquire(block=True)
+#                 wtbwpipe.write(sbuff)
+#                 lock.release()        
+#                 sbuff = ""
+#                 flushes = 0      
+#             #reinit window, add new chrom line        
+#             w = wzero.copy() + val
+#             cpos = pos
+#             sbuff += clinef(cpos + 1)
+#         else:
+#             #step
+#             sbuff += '\n'.join( w[:step].astype(str) ) + '\n'
+#             w = np.roll(w, -step)
+#             w[-step:] = 0
+#             w += val
+#             cpos = pos
+#     getlock = lock.acquire(block=True)
+#     wtbwpipe.write(sbuff)
+#     lock.release()
+#     return '{} done!'.format(chrom)
+
+def yield_chunks(args, chrom):
     bam = pysam.AlignmentFile(args.bam)
     
     #ff is a function that gets instantiated based on
@@ -135,71 +218,84 @@ def generate_starts(args, chrom):
     
     
     d = {}
-    for read in bam.fetch(reference=chrom):
+    for read in bam.fetch(chrom, 0, args.chrom_size[chrom] ) :
         if ff(read.flag) and ffr(read.tlen) and fq(read.mapq):
             if read.is_reverse:
                 d[read.aend + ns_C] = d.get(read.aend + ns_C, 0) + 1
             else:
                 d[read.pos + ps_C] = d.get(read.pos + ps_C, 0) + 1
     
-    for kv in sorted(d.items()):
-        yield kv
+    
+    pairs =  iter(sorted(d.items()))
+    del d
+
+    chunk = [pairs.next()]
+    cpos = chunk[0][0]
+
+    max_dist = args.extsize + (args.bucket_size -1)
+       
+    for pair in pairs:
+        if pair[0] >= cpos + max_dist:
+            yield chunk
+            chunk = [pair]
+            cpos = pair[0]
+        else:
+            chunk.append(pair)
+            cpos = pair[0]
+
+def split_every(n, iterable):
+    i = iter(iterable)
+    piece = list(islice(i, n))
+    while piece:
+        yield piece
+        piece = list(islice(i, n))
+
+def yield_windows(args, chrom):
+    for chunk in yield_chunks(args, chrom):
+        wl = (chunk[-1][0] - chunk[0][0]) + args.extsize
+        ws = chunk[0][0]
+        w = np.zeros(wl)
+        wse = - ws + args.extsize
+        for c,v in chunk:
+            w[c-ws:c + wse] += v
+        yield ws, w
+        
+def yield_window_str(args,chrom):
+    # cline = "fixedStep  chrom={}  start={{}}  step={} span={}\n{{}}\n".format(chrom, st,st)
+    # clinef = cline.format
+    st = args.bucket_size
+    for ws, w in yield_windows(args, chrom):
+        cline = "fixedStep  chrom={}  start={{}} step={} span={}\n{{}}\n".format(chrom, st,st)
+        clinef = cline.format
+        # while len(w) % st != 0:
+        #     w = np.append(w,w[-1])
+        # np.average( w.reshape((len(w)/st,st)), axis=1, weights=None).astype(str)
+        if st > 1:
+            w = [np.mean(x) for x in split_every(st,w)]
+        vl = '\n'.join( np.array(w.astype(str) ))
+        
+        line = clinef(ws , vl)
+        yield line
 
 def one_worker((args, chrom)):
     
-    wlen = args.extsize
-    starts = generate_starts(args, chrom)
-    wzero = np.zeros(wlen, dtype=np.uint16)
-    cline = "fixedStep  chrom={}  start={{}}  step=1\n".format(chrom)
-    clinef = cline.format
-    flushes = 0
-    
-    
-    cpos,cval = starts.next()
-    while cpos < 0:
-        cpos,cval = starts.next()
-    w = wzero.copy() + cval
-    sbuff = clinef(cpos + 1)
-
-    for pos,val in starts:
-        step = pos - cpos
-        if step >= wlen :
-            sbuff += '\n'.join(w.astype(str)) + '\n'
-            flushes += 1
-            
-            #try to empty sbuffer
-            if flushes > 100:
-                getlock = lock.acquire(block=True)
-                wtbwpipe.write(sbuff)
-                lock.release()
-                
-                sbuff = ""
-                flushes = 0
-            
-            #reinit window, add new chrom line        
-            w = wzero.copy() + val
-            cpos = pos
-            sbuff += clinef(cpos + 1)
-        else:
-            #step
-            sbuff += '\n'.join( w[:step].astype(str) ) + '\n'
-            w = np.roll(w, -step)
-            w[-step:] = 0
-            w += val
-            cpos = pos
-    
+    toprint = ""
+    for wigglelines in islice(yield_window_str(args, chrom), 100):
+        toprint += "".join( wigglelines )
+    # toprint = "".join(yield_window_str(args, chrom))
     getlock = lock.acquire(block=True)
-    wtbwpipe.write(sbuff)
+    wtbwpipe.write(toprint)
     lock.release()
 
     return '{} done!'.format(chrom)
-    
 def init(l,p):
     #http://stackoverflow.com/questions/25557686/python-sharing-a-lock-between-processes
     global lock
     global wtbwpipe
     lock = l
+
     wtbwpipe = p
+    # wtbwpipe = open("./foo.wig",'w')
 
 def bamtobw(args):
     
@@ -209,8 +305,11 @@ def bamtobw(args):
     loc = []
     with open(args.chrominfo, "r") as fi:
         for line in fi:
-            loc.append(tuple(line.rstrip().split("\t")[:2]))
-    chroms = [x[0] for x in sorted(loc,reverse=True, key=lambda x: int(x[1]))]
+            c,v = line.rstrip().split("\t")[:2]
+            loc.append((c,int(v)))
+
+    chroms = [x[0] for x in sorted(loc,reverse=True, key=lambda x: x[1])]
+    args.chrom_size = dict(loc)
 
     wtbw = subp.Popen(["wigToBigWig",
                     "-clip",
@@ -320,6 +419,9 @@ if __name__ == '__main__':
                         help="shift reads mapping to the plus strand by +5 and reads that map\
                         on the minus strand by -4. This centers the cutting ends on the center of the\
                         transposase 'event'. Overwrites --shift_p to 5 and --shift_n to -4")
+    parser.add_argument('-buck', '--bucket_size', type= int, default=1, metavar='',
+                        help="This will bucket the signal in -buck sized buckets. That decreased resolution\
+                        but will run faster and create a smaller sized bw file. Default is 1")
 
     ht = parser.add_argument_group('Extra Help', "")
 
