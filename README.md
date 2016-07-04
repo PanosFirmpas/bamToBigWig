@@ -1,4 +1,11 @@
 # bamToBigWig
+
+```sh
+04/07/2016:
+Please be careful with results, 
+I have not yet thoroughly tested this script (but it should be working properly).
+I would very much appreciate any feedback !
+```
 Directly create a bigwig file with signal derived from a sorted and indexed bam file.
 
 This script uses pysam to read the input bam file, filters and shifts the reads,
