@@ -27,8 +27,6 @@ if os.name == 'posix' and sys.version_info[0] < 3:
 else:
     import subprocess as subp
 
-    
-# import multiprocessing as mp
 from multiprocessing import Pool,Lock
 import pysam
 import numpy as np
@@ -59,7 +57,8 @@ def which(program):
 class FlagFilter():
     '''This class instantiates a filter based on the args. The idea
     is to only ever expose one filtering fuction for the reads and
-    not to have unnecessary elifs and clutter.'''
+    not to have unnecessary elifs and clutter.
+    It is a bit hacky but fun'''
     def __init__(self, args):
         
         if args.filter_lc and args.filter_uc:
@@ -112,87 +111,8 @@ class FragFilter():
         tlu = args.t_len_upper
         return lambda x: (x <= tlu)
 
-# def generate_starts(args, chrom):
-    
-#     bam = pysam.AlignmentFile(args.bam)
-    
-#     #ff is a function that gets instantiated based on
-#     #the arguments. It returns True for acceptable reads
-#     f = FlagFilter(args)
-#     ff = f.filter_func
 
-#     fr = FragFilter(args)
-#     ffr = fr.filter_func
 
-#     if args.q :
-#         fq = lambda x : x >= args.q 
-#     else :
-#         fq = lambda x: True
-    
-#     #p strand constant
-#     ps_C = args.shift + args.shift_p
-#     #n strand constant
-#     ns_C = - args.shift - args.shift_n - args.extsize
-
-    
-    
-#     d = {}
-#     for read in bam.fetch(reference=chrom):
-#         if ff(read.flag) and ffr(read.tlen) and fq(read.mapq):
-#             if read.is_reverse:
-#                 d[read.aend + ns_C] = d.get(read.aend + ns_C, 0) + 1
-#             else:
-#                 d[read.pos + ps_C] = d.get(read.pos + ps_C, 0) + 1
-    
-#     for kv in sorted(d.items()):
-#         yield kv
-
-# def one_worker_old((args, chrom)):
-    
-#     wlen = args.extsize
-#     starts = generate_starts(args, chrom)
-#     wzero = np.zeros(wlen, dtype=np.uint16)
-#     cline = "fixedStep  chrom={}  start={{}}  step=1\n".format(chrom)
-#     clinef = cline.format
-#     flushes = 0
-#     clines = []
-#     cvals = []
-
-    
-#     cpos,cval = starts.next()
-#     while cpos < 0:
-#         cpos,cval = starts.next()
-    
-#     w = wzero.copy() + cval
-#     clines.append( clinef(cpos + 1) )
-
-#     for pos,val in starts:
-#         step = pos - cpos
-#         if step >= wlen :
-#             sbuff += '\n'.join(w.astype(str)) + '\n'
-#             flushes += 1
-#             #try to empty sbuffer
-#             if flushes > 100:
-#                 getlock = lock.acquire(block=True)
-#                 wtbwpipe.write(sbuff)
-#                 lock.release()        
-#                 sbuff = ""
-#                 flushes = 0      
-#             #reinit window, add new chrom line        
-#             w = wzero.copy() + val
-#             cpos = pos
-#             sbuff += clinef(cpos + 1)
-#         else:
-#             #step
-#             sbuff += '\n'.join( w[:step].astype(str) ) + '\n'
-#             w = np.roll(w, -step)
-#             w[-step:] = 0
-#             w += val
-#             cpos = pos
-#     getlock = lock.acquire(block=True)
-#     wtbwpipe.write(sbuff)
-#     lock.release()
-#     return '{} done!'.format(chrom)
 
 def yield_chunks(args, chrom):
     bam = pysam.AlignmentFile(args.bam)
@@ -200,11 +120,14 @@ def yield_chunks(args, chrom):
     #ff is a function that gets instantiated based on
     #the arguments. It returns True for acceptable reads
     f = FlagFilter(args)
+    #the flag filter
     ff = f.filter_func
 
     fr = FragFilter(args)
+    #the fragment length filter
     ffr = fr.filter_func
 
+    # the quality filter
     if args.q :
         fq = lambda x : x >= args.q 
     else :
@@ -215,25 +138,45 @@ def yield_chunks(args, chrom):
     #n strand constant
     ns_C = - args.shift - args.shift_n - args.extsize
 
-    
-    
+    # This 'worker' will go through all the reads,
+    # and with thoe reads that pass the various filters
+    # it will create a dictionary
+    # where d = { position: NumberofCuts }
     d = {}
     for read in bam.fetch(chrom, 0, args.chrom_size[chrom] ) :
         if ff(read.flag) and ffr(read.tlen) and fq(read.mapq):
             if read.is_reverse:
-                d[read.aend + ns_C] = d.get(read.aend + ns_C, 0) + 1
+                dpos = read.aend + ns_C
+                d[ dpos ] = d.get( dpos , 0) + 1
             else:
-                d[read.pos + ps_C] = d.get(read.pos + ps_C, 0) + 1
+                dpos = read.pos + ps_C
+                d[ dpos ] = d.get( dpos , 0) + 1
     
-    
+    # Now that we have the dictionary
+    # we can cast it in an iterable of tuples
+    # Which we sort. This guarantees that 
+    # we are actually walking through the chromosome from its start
+    # to its end, and we get the positions with cuts in proper order
     pairs =  iter(sorted(d.items()))
     del d
 
     chunk = [pairs.next()]
     cpos = chunk[0][0]
 
+    # A chunk is a collection (tuple) of position:numberofcuts pairs.
+    # Since we only add signal to a certain range AFTER a 'cut'
+    # [Note that the actual cutting sites have been moveed in the previous step,
+    # the cuts in "pairs" are the positions from which we will add X bases of signal downstream]
+    # we seggregate the positions in chunks where there is no greater distance between
+    # each chunk than 'max_dist'
+
+    # This allows the creation of a healthy wiggle file
+    # since we don't want our wiggle to be full of zeroes
     max_dist = args.extsize + (args.bucket_size -1)
-       
+    
+    # so this bit of code here goes through all the pairs
+    # and yields them in 'chunks'
+    # Each chunk will be one "wiggle field"
     for pair in pairs:
         if pair[0] >= cpos + max_dist:
             yield chunk
@@ -243,6 +186,7 @@ def yield_chunks(args, chrom):
             chunk.append(pair)
             cpos = pair[0]
 
+# splits an iterable every n values
 def split_every(n, iterable):
     i = iter(iterable)
     piece = list(islice(i, n))
@@ -251,51 +195,76 @@ def split_every(n, iterable):
         piece = list(islice(i, n))
 
 def yield_windows(args, chrom):
+    chromsize = args.chrom_size.get(chrom)
+
     for chunk in yield_chunks(args, chrom):
+        # window length
         wl = (chunk[-1][0] - chunk[0][0]) + args.extsize
+        # window start
         ws = chunk[0][0]
+        # the window itsself, a np array
         w = np.zeros(wl)
+
         wse = - ws + args.extsize
         for c,v in chunk:
             w[c-ws:c + wse] += v
-        yield ws, w
+
+        #this shouldnt happen, right?
+        if ws < 0 :
+            w = w[abs(ws):]
+            ws = 0
+        # hm
+        if ws >= chromsize:
+            continue
+            
+        # chop the window a bit if it exceeds chromosome size
+        extra = (ws + len(w)) - chromsize
+        if extra >0:
+            w = w[:-extra]
+
+        # ufff
+        if w.size==0:
+            # print('empty window:',chrom, ws,w)
+            continue
+
+        # We have been 0-based so far
+        # but apparently wiggle is 1-based soooooo:
+        yield ws+1, w +1
         
 def yield_window_str(args,chrom):
-    # cline = "fixedStep  chrom={}  start={{}}  step={} span={}\n{{}}\n".format(chrom, st,st)
-    # clinef = cline.format
     st = args.bucket_size
     for ws, w in yield_windows(args, chrom):
+        # we fill in the chrom and step
         cline = "fixedStep  chrom={}  start={{}} step={} span={}\n{{}}\n".format(chrom, st,st)
         clinef = cline.format
-        # while len(w) % st != 0:
-        #     w = np.append(w,w[-1])
-        # np.average( w.reshape((len(w)/st,st)), axis=1, weights=None).astype(str)
+        # reform the window if buckets
         if st > 1:
             w = [np.mean(x) for x in split_every(st,w)]
+
+        # transform the values to a string with one value per line
         vl = '\n'.join( np.array(w.astype(str) ))
         
+        # make a string with the cline and the values
         line = clinef(ws , vl)
+
         yield line
 
 def one_worker((args, chrom)):
     
-    toprint = ""
-    for wigglelines in islice(yield_window_str(args, chrom), 100):
-        toprint += "".join( wigglelines )
-    # toprint = "".join(yield_window_str(args, chrom))
-    getlock = lock.acquire(block=True)
-    wtbwpipe.write(toprint)
-    lock.release()
+    toprint = "".join(yield_window_str(args, chrom))
+    
+    with lock:
+        wtbwpipe.write(toprint)
+        wtbwpipe.flush()
 
     return '{} done!'.format(chrom)
+
 def init(l,p):
     #http://stackoverflow.com/questions/25557686/python-sharing-a-lock-between-processes
     global lock
     global wtbwpipe
     lock = l
-
     wtbwpipe = p
-    # wtbwpipe = open("./foo.wig",'w')
 
 def bamtobw(args):
     
@@ -330,7 +299,7 @@ def bamtobw(args):
 
     pool.close()
     pool.join()
-    
+
     wtbw.stdin.close()
     wtbw.wait()
 
@@ -341,13 +310,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=
         '''
         THIS SCRΙPT IS NOT YET WELL TESTED, so be careful with the results~~~~~~~~~~  \
-        Please report your results at                                                 \
+        Please report any issues at https://github.com/PanosFirmpas/bamToBigWig       \
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\
         Create a bigwig file with signal derived from a sorted and indexed bam file.  \
         Use the options to shape the signal according to what you are visualizing.    \
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\
         Reads can be filtered with -f and/or -F which work like in "samtools view".   \
-        Try the options --explain_flags or --filter_examples for more help with this. \
+        Try the option --explain_flags for more help with this.                       \
         Reads can also be filtered by a lower/upper limit for tlen. See --t_len_upper \
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\
         The reads can be shifted by --shift towards 5'->3' before being expanded by   \
@@ -360,39 +329,43 @@ if __name__ == '__main__':
 
 
     parser.add_argument('-b','--bam', type=str, metavar='',
-                       help='the input .bam file. Must be sorted and indexed.')
+                       help='The input .bam file. Must be sorted and indexed.')
+    
     parser.add_argument('-chr','--chrominfo', type=str, metavar='',
                        help='A two column |<chromosome name> <total_length>| txt file. \
                        Required by wigToBigWig. The chromosome names must fit those on the bam file. bamToBigWig only\
                        works on the chromosomes found in this file, so if you want to create a bigwig with only \
                        some chromosomes included, edit this input file accordingly.')
+    
     parser.add_argument('-o','--out', type=str, metavar='',
-                       help='the output .bw file. If not given, it will be /path/to/input(.bam).bw')
+                       help='The output .bw file. If not given, it will be /path/to/input(.bam).bw')
+    
     parser.add_argument('-q','--q', type=int, default = None,metavar='',
                        help='Only include reads with mapping quality >= this option. Default is None, no q filter is applied.')
+    
     parser.add_argument('-f','--filter_lc', type=int, default = None,metavar='',
                        help='Only include reads with all bits of this argument set in their flag. Default is None,\
                        no read filter is applied. See --explain_flags')   
+
     parser.add_argument('-F','--filter_uc', type=int, default = None,metavar='',
                        help='Only include reads with none of the bits of this argument set in their flag. See --explain_flags')
-
-    parser.add_argument('-tll','--t_len_lower', type=int, default = None,metavar='',
-                       help='Sets filtering so that only reads with absolute(tlen) greater than this are accepted.\
-                       See also --t_len_upper')
 
     parser.add_argument('-tlu','--t_len_upper', type=int, default = None,metavar='',
                        help='Sets filtering so that only reads with absolute(tlen) lower than this are accepted.\
                        This field is set by the mapper, but for paired-end DNA it will typically refer to the\
                        fragment size. For ATAC experiments, setting this to approximately 120, will visualize\
                        the "nucleosome free" reads. Default is "None", no fragment size filter is applied.')
+    parser.add_argument('-tll','--t_len_lower', type=int, default = None,metavar='',
+                       help='Sets filtering so that only reads with absolute(tlen) greater than this are accepted.\
+                       See also --t_len_upper')
 
     parser.add_argument('-p','--procs', type=int, default= 4,
-                       help='The number of processors to use. Defaults to 4. Be advised that one of those\
+                       help='The number of processors to use. Defaults to 4. One of those\
                        processors with be consumed by the wigToBigWig process. After that, each available\
                        processor works on one chromosome at a time until all chromosomes are done.')
 
     parser.add_argument('-sh', '--shift', type= int, default=-3, metavar='',
-                        help="arbitrary shift in bp. This value is used to move cutting ends (5') towards 5'->3'.\
+                        help="Arbitrary shift in bp. This value is used to move cutting ends (5') towards 5'->3'.\
                         If you want to extend the signal downstream of the original cutting end,\
                         for example to visualize CHIPseq experiments, you will want to leave this value to 0\
                         and set --extsize to how much you want to extend. If on the other hand you want to\
@@ -400,7 +373,7 @@ if __name__ == '__main__':
                         ATACseq or DNAse-seq, you will want to set this value.\
                         The default value -3 in combination with the default value of --extsize 7\
                         will extend the signal by 3bp around the cutting end.\
-                        NOTE: this is different than the ATAC-correction shift, and is applied on top of it.")
+                        NOTE: this is different than the --atac option, or the --shift_p/shift_n otpions, and is applied on top of them.")
 
     parser.add_argument('-exts', '--extsize', type= int, default=7, metavar='',
                         help="arbitrary extension size in bp. \
@@ -420,17 +393,18 @@ if __name__ == '__main__':
                         on the minus strand by -4. This centers the cutting ends on the center of the\
                         transposase 'event'. Overwrites --shift_p to 5 and --shift_n to -4")
     parser.add_argument('-buck', '--bucket_size', type= int, default=1, metavar='',
-                        help="This will bucket the signal in -buck sized buckets. That decreased resolution\
-                        but will run faster and create a smaller sized bw file. Default is 1")
+                        help="This will bucket the signal in -buck sized buckets. This will decrease resolution\
+                        but will run faster and create a smaller sized bw file. \n\
+                        Be advised, this will most probably leave bases with incorrect signal value in the .bw file. Default is 1")
 
     ht = parser.add_argument_group('Extra Help', "")
 
     ht.add_argument('-exfl','--explain_flags', action='store_true',
-                        help="Print some extra help about filtering reads with their flags and exit.")
-    ht.add_argument('-exfi','--filter_examples', action='store_true',
-                        help="Print some examples of filtering reads with their flags and exit.")
+                        help="Show some extra help about filtering reads with their flags.")
+    # ht.add_argument('-exfi','--filter_examples', action='store_true',
+    #                     help="Show some examples of filtering reads with their flags and exit.")
     ht.add_argument('-exco','--coverage_examples', action='store_true',
-                        help="Print some examples of filtering reads with their flags and exit.")
+                        help="Show some examples of filtering reads with their flags and exit.")
 
     # only report one chromosome
 
@@ -456,6 +430,7 @@ http://hgdownload.soe.ucsc.edu/admin/exe/ ")
     if args.explain_flags:
         print (
             """
+    Theory:
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
     Sequencing reads in sam/bam files contain a binary flag, which is a \n\
     combination of 12 bit-wise flags. This allows fast and efficient filtering\n\
@@ -468,17 +443,9 @@ http://hgdownload.soe.ucsc.edu/admin/exe/ ")
     If you set the -f option to 2, you are making sure that only reads which  \n\
     have their second bitwise flag set to 1 will be used. By setting the -F   \n\
     option to 2, you are making sure that such reads are excluded.
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
-    An amazing resource to help you set your filters can be found here here:  \n\
-    https://broadinstitute.github.io/picard/explain-flags.html                \n\
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
-    For some examples try the --filter_examples option
-    """)
-        parser.exit()
 
-    if args.filter_examples:
-        print (
-            """
+
+    Some Examples:
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
     # Only use 'proper pair' reads (usually implies more filters)\n\
     >> bamToBigWig -b in.bam -chr chrm.txt -f 2 \n\n\
@@ -492,12 +459,38 @@ http://hgdownload.soe.ucsc.edu/admin/exe/ ")
     >> bamToBigWig -b in.bam -chr chrm.txt -F 16 \n\n\
     # Only use 'proper pair' reads that mapped on the '+' strand:\n\
     >> bamToBigWig -b in.bam -chr chrm.txt -f 2 -F 16 \n\n\
+
+
+    More:
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
     An amazing resource to help you set your filters can be found here here:  \n\
     https://broadinstitute.github.io/picard/explain-flags.html                \n\
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
     """)
         parser.exit()
+
+    # if args.filter_examples:
+    #     print (
+    #         """
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
+    # # Only use 'proper pair' reads (usually implies more filters)\n\
+    # >> bamToBigWig -b in.bam -chr chrm.txt -f 2 \n\n\
+    # # EXCLUDE 'proper pair' reads \n\
+    # >> bamToBigWig -b in.bam -chr chrm.txt -F 2 \n\n\
+    # # Only use reads that mapped on the '-' strand:\n\
+    # >> bamToBigWig -b in.bam -chr chrm.txt -f 16 \n\n\
+    # # Only use 'proper pair' reads that mapped on the '-' strand:\n\
+    # >> bamToBigWig -b in.bam -chr chrm.txt -f 18 \n\n\
+    # # Only use reads that mapped on the '+' strand (we exclude the '-' reads):\n\
+    # >> bamToBigWig -b in.bam -chr chrm.txt -F 16 \n\n\
+    # # Only use 'proper pair' reads that mapped on the '+' strand:\n\
+    # >> bamToBigWig -b in.bam -chr chrm.txt -f 2 -F 16 \n\n\
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
+    # An amazing resource to help you set your filters can be found here here:  \n\
+    # https://broadinstitute.github.io/picard/explain-flags.html                \n\
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
+    # """)
+    #     parser.exit()
     if args.coverage_examples:
         print (
             """
@@ -531,7 +524,7 @@ http://hgdownload.soe.ucsc.edu/admin/exe/ ")
         args.out = os.path.join(pathto, out)
     else:
         pathto,out = os.path.split(args.bam)
-        out = out[-3:] + "bw"
+        out = out[:-3] + "bw"
         args.out = os.path.join(pathto, out)
 
     if args.atac:
