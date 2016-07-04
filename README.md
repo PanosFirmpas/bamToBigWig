@@ -25,6 +25,11 @@ First of all, try this:
 $ git clone https://github.com/PanosFirmpas/bamToBigWig
 $ #You might need sudo for the following command
 $ pip install -e ./bamToBigWig
+$ # The -e flag, keep the installed script pointing to the git repository that
+$ # you just cloned. This means that you can't remove the repository,
+$ # but you can now update the script by doing 
+$ git pull
+$ # from inside the git repo folder
 ```
 If that does't work, here are more details on installing:
 ##### 1) Requirements
@@ -34,14 +39,14 @@ If that does't work, here are more details on installing:
     bamToBigWig is a python script, so you will need a working installation of python, thankfully most operating systems these days come with python already installed so this should't be a problem.
     *    [pysam](https://github.com/pysam-developers/pysam) is used to read the input bam file, to install it follow the instructions in the project's page. Any python version should work.
     *    [numpy](http://www.scipy.org/scipylib/download.html) is also needed and needs to be installed.
-            ```sh
+            ```
             $ pip install numpy
             ```
             should work.
     
 ##### 2) bamToBigWig
 
-Is a single script, so you could just take the script file from the /scripts/ folder and run it from anywhere in your system, as long as the required libraries are available. Since this is packages as a python package though, you can use the setup.py script to automatically install bamToBigWig in your system.
+Is a single script, so you could just take the script file from the /scripts/ folder and run it from anywhere in your system, as long as the required libraries are available. Since this is packaged as a python package though, you can use the setup.py script to automatically install bamToBigWig in your system.
 
 Using the setup.py script:
 ```sh
@@ -133,6 +138,16 @@ Like --shift (and applied on top of it), but only applied to reads that map on t
 Shift reads mapping to the plus strand by +5 and reads that map
 on the minus strand by -4. This centers the cutting ends on the center of the
 transposase 'event'. Overwrites --shift_p to 5 and --shift_n to -4.
+##### -buck,--bucket_size 
+This will bucket the signal in -buck sized buckets. This will decrease resolution but will run faster and
+create a smaller sized bw file. *Be warned*, this will most probably leave bases with incorrect signal value
+in the .bw file. Default is 1
+##### -exfl,--explain_flags
+Show some extra help about filtering reads with their flags.
+##### -exco,--coverage_examples
+Show some examples of filtering reads with their flags and exit.
+
+
 
 
 
