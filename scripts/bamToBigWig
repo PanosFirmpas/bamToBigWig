@@ -157,7 +157,9 @@ def yield_chunks(args, chrom):
     # Which we sort. This guarantees that
     # we are actually walking through the chromosome from its start
     # to its end, and we get the positions with cuts in proper order
+
     pairs = iter(sorted(d.items()))
+
     del d
 
     chunk = [pairs.next()]
@@ -185,6 +187,8 @@ def yield_chunks(args, chrom):
         else:
             chunk.append(pair)
             cpos = pair[0]
+    # yield the last chunk
+    yield chunk
 
 
 def split_every(n, iterable):
@@ -200,6 +204,7 @@ def yield_windows(args, chrom):
     chromsize = args.chrom_size.get(chrom)
 
     for chunk in yield_chunks(args, chrom):
+        
         # window length
         wl = (chunk[-1][0] - chunk[0][0]) + args.extsize
         # window start
@@ -211,7 +216,7 @@ def yield_windows(args, chrom):
         for c, v in chunk:
             w[c - ws: c + wse] += v
 
-        # this shouldnt happen, right?
+        # this shouldnt happen, right? (If can happen if a read is near 0, thanks to shifts)
         if ws < 0:
             w = w[abs(ws):]
             ws = 0
@@ -224,15 +229,15 @@ def yield_windows(args, chrom):
             w = w[:-extra]
         # ufff
         if w.size == 0:
-            # print('empty window:',chrom, ws,w)
             continue
 
         # We have been 0-based so far
-        # but apparently wiggle is 1-based soooooo:
-        yield ws + 1, w + 1
+        # but wiggle is 1-based soooooo:
+        yield ws + 1, w
 
 
 def yield_window_str(args, chrom):
+
     st = args.bucket_size
     for ws, w in yield_windows(args, chrom):
         # we fill in the chrom and step
@@ -248,6 +253,7 @@ def yield_window_str(args, chrom):
         line = clinef(ws, vl)
 
         yield line
+
 
 
 def one_worker((args, chrom)):
@@ -389,7 +395,7 @@ if __name__ == '__main__':
     parser.add_argument('-sh_n', '--shift_n', type= int, default=0, metavar='',
                         help="Like --shift (and applied on top of it), but only applied to reads that map on the negative strand.")
 
-    parser.add_argument('-atac', '--atac', action='store_true', default=True,
+    parser.add_argument('-atac', '--atac', action='store_true', default=False,
                         help='''shift reads mapping to the plus strand by +5 and reads that map\
                         on the minus strand by -4. This centers the cutting ends on the center of the\
                         transposase 'event'. Overwrites --shift_p to 5 and --shift_n to -4''')
