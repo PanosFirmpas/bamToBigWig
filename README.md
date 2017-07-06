@@ -1,7 +1,7 @@
 # bamToBigWig
 Directly create a bigwig file with signal derived from a sorted and indexed bam file.
 
-This script uses pysam to read the input bam file, filters and shifts the reads,
+This script reads the input bam file, filters and shifts the reads,
 and then computes the signal with single base resolution and directly outputs a .bw file. 
 It should run significantly faster than indirect approaches since it is parallelizeable
 while skipping any intermediate conversions between file types.
