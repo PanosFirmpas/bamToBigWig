@@ -10,15 +10,15 @@ def read(fname):
 
 setup(
     name = "bamToBigWig",
-    version = "0.1.BETA",
-    author = "Panos Firmpas",
+    version = "0.2.BETA",
+    author = "Panos Firbas",
     author_email = "panosfirbas@gmail.com",
     description = ("Create a bigwig file with signal derived from a sorted and indexed bam file."),
     license = "GPL3",
-    keywords = "bam bigwig",
+    keywords = "bam bigwig genomic signal",
     url = "https://github.com/PanosFirmpas/bamToBigWig",
     packages=[''],
-    install_requires=['numpy', 'pysam'],
+    install_requires=['numpy', 'pysam', 'pyBigWig', 'SharedArray'],
     long_description=read('README.md'),
     scripts=['scripts/bamToBigWig'],
     classifiers=[
