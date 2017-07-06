@@ -2,34 +2,35 @@
 Directly create a bigwig file with signal derived from a sorted and indexed bam file.
 
 This script uses pysam to read the input bam file, filters and shifts the reads,
-and then computes the signal with single base resolution and directly outputs
-a wiggle file to a wigToBigWig process that runs in the background. It
-should run significantly faster than indirect approaches since it is parallelizeable
+and then computes the signal with single base resolution and directly outputs a .bw file. 
+It should run significantly faster than indirect approaches since it is parallelizeable
 while skipping any intermediate conversions between file types.
 
 ![Alt text](/Drawing.png?raw=true "Optional Title")
 
-    
-    
-    
+     
 ## Installation
+This should work with any decently modern python version, in any Linux distribution or MacOS.
 First of all, try this:
 ```sh
 $ git clone https://github.com/PanosFirmpas/bamToBigWig
-$ #You might need sudo for the following command
+$ #You might need sudo for the following commands
+$ pip install numpy
 $ pip install ./bamToBigWig
 ```
 If that does't work, here are more details on installing:
+
 ##### 1) Requirements
-* bamToBigWig uses [wigToBigWig](https://genome.ucsc.edu/util.html) to create the .bw file, so the wigToBigWig executable needs to be in your path. A simple if not very elegant way to do this, is to download the executable from the link above and put it somewhere like */usr/local/bin* .
-*  **Python libraries**  
-    bamToBigWig is a python script, so you will need a working installation of python. Thankfully most operating systems these days come with python already installed so this should't be a problem.
-    *    [pysam](https://github.com/pysam-developers/pysam) is used to read the input bam file, to install it follow the instructions in the project's page. Any python version should work.
-    *    [numpy](http://www.scipy.org/scipylib/download.html) is also needed and needs to be installed.
+bamToBigWig is a python script, so you will need a working installation of python. Thankfully most operating systems these days come with python already installed so this should't be a problem.
+    *    [numpy](http://www.scipy.org/scipylib/download.html) is needed and needs to be installed first.
             ```
             $ pip install numpy
             ```
             should work.
+    *    [pysam](https://github.com/pysam-developers/pysam) is used to read the input bam file, to install it follow the instructions in the project's page. 
+    *    [pyBigWig](https://github.com/dpryan79/pyBigWig) is used to write the output bw file, to install it follow the instructions in the project's page. 
+    *    [SHaredArray](https://pypi.python.org/pypi/SharedArray) is used for the multiprocessing commuunication.
+    
     
 ##### 2) bamToBigWig
 
@@ -91,15 +92,15 @@ contained an entire nucleosome, meaning they are more likely to have come from a
 #####  -b,--bam
 This us a required option and should be the path to the input .bam file.
 The bam file must be sorted and indexed (samtoools sort, samtools index)
+You can give more than one input files, separated by space, or even 
+wilcard expressions e.g.,"/path/to/some/species_stage*_replicate*.bam" . 
 #####  -chr,--chrominfo
 This should be a simple text file with two or more tab-separated columns (columns after the firt two will be ignored).  
 The first column contains chromosome names and the second column their respective sizes in nucleotides. This file is  
 required by wigToBigWig, but also works as a convenient way to filter chromosomes.  bamToBigWig only works on the  
 chromosomes found in this file, so if you want to create a bigwig with only some chromosomes included,  
 edit this input file accordingly. Chromosome names need to be the same in the bam file and the chrom info file.
-#### Optional:
-#####  -o,--out
-The path to the output .bw file. If not given, for an input file of "/path/to/input.bam" the output file will be set to /path/to/input.bw'.
+#### Filtering Arguments:
 #####  -q,--q
 Only include reads with mapping quality >= this option. Default is None, no q filter is applied.
 #####  -f,--filter_lc
@@ -112,19 +113,19 @@ The 'tlen' is set by the mapper, so be careful. For paired-end DNA it will typic
 'fragment size', that is, the distance between the two cutting ends of each pair of reads. For ATAC experiments, setting this to approximately 120, will visualize the "nucleosome free" reads.  If you set this option, it is suggested to also set t_len_lower to at least 0 so that reads without a mate (tlen -1) get filtered out, alternatively, set an appropriate -F filter.  Default is "None", no fragment size filter is applied.
 #####  -tll,--t_len_lower
 Sets filtering so that only reads with absolute(tlen) greater than this are accepted. See also --t_len_upper
-##### -p,--procs
-The number of processors to use. Defaults to 4. Be advised that one of those processors with be consumed by the wigToBigWig process. After that, each available processor works on one chromosome at a time until all chromosomes are done.
+#### Shifting/Extending Arguments:
 #####  -sh,--shift
 Arbitrary shift in bp. This value is used to move cutting ends (5') towards 5'->3'. If you want to
 extend the signal downstream of the original cutting end, for example to visualize CHIPseq experiments,
 you will want to leave this value to 0 and set --extsize to how much you want to extend. If on the
 other hand you want to extend the signal to both sides of the cutting end, for example if you are
 visualizing ATACseq or DNAse-seq, you will want to set this value to something negative.  
-The default value -3 in combination with the default value of --extsize 7 will extend the signal by 3bp around the cutting end. 
+The default value -35 in combination with the default value of --extsize 70 will extend the signal by 35bp around the cutting end. 
 #####  -exts,--extsize
 Arbitrary extension size in bp.This value is used to extend each read towards 3' end.
-Can be usefully combined with --shift. The default value is 7 which in combination with the 
-default --shift -3 extends the signal by 3bp upstream and downstream of the original cutting end.
+Can be usefully combined with --shift. The default value is 70 which in combination with the 
+default --shift -35 extends the signal by 35bp upstream and downstream of the original cutting end.
+If this is set to 'fragment',reads will be extended until their mate.
 #####  -sh_p,--shift_p
 Like --shift (and applied on top of it), but only applied to reads that map on the possitive strand. Default is 0.
 #####  -sh_n,--shift_n
@@ -132,7 +133,19 @@ Like --shift (and applied on top of it), but only applied to reads that map on t
 #####  -atac,--atac
 Shift reads mapping to the plus strand by +5 and reads that map
 on the minus strand by -4. This centers the cutting ends on the center of the
-transposase 'event'. **this OVERWRITES --shift_p to 5 and --shift_n to -4.**
+transposase 'event'. **this OVERWRITES --shift_p to 5 and --shift_n to -4.**    
+
+####  Other Arguments
+#####  -o,--out
+The path to the output .bw file. If not given, for an input file of "/path/to/input.bam" the output file will be set to /path/to/input.bw'.
+##### -p,--procs
+The number of processors to use. Defaults to 4. Be advised that one of those processors with be consumed by the wigToBigWig process. After that, each available processor works on one chromosome at a time until all chromosomes are done.    
+##### -split, --split_strands
+Output separate files for + strand and - strand. They will automatically be named based on the output.bw     
+(output_pstrand.bw / output_nstrand.bw)
+##### -vv, --verbose        
+Prints out some helpful/debugging messages.
+
 ##### -exfl,--explain_flags
 Sequencing reads in sam/bam files contain a binary flag, which is a  combination of 12 bit-wise flags.  They are set by the aligner/mapper and allow fast and efficient filtering of the reads.  
 If a read, for example, has its flag set to 2, we can see the bitwise flags by converting 2 to its binary representation which is 000000000010 .  
