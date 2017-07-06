@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/home/ska/panos/b2bwTests/py2/venv/bin/python2
 """Create a bigwig file with signal derived from a sorted and indexed bam file."""
 ###############################################################################
 ## bamToBigWig
@@ -169,7 +169,6 @@ def cuts_d_extend(d, extend):
     '''Convert d into dee'''
     ed = { k+extend+1 : v*-1 for k,v in d.items()}
     dee = { k: d.get(k,0)+ed.get(k,0)  for k in set(d.keys()).union( set( ed.keys())) }
-    del ed
     return dee
 
 def yield_bedgraph_fields(dee):
@@ -334,7 +333,7 @@ def bamtobw(args):
     CL = iter(sorted(args.chrom_size.keys()))       
     iterabull = iter(sorted(args.chrom_size.keys()))       
         
-    pool = Pool(min(args.procs - 1,1), initializer=poolinit, initargs=(args, ))
+    pool = Pool(max(args.procs - 1,1), initializer=poolinit, initargs=(args, ))
     
     cache = {}
     nextC = next(CL)
@@ -376,9 +375,9 @@ def main():
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\
         Use -p to parallelize (at the very least 2 cores are recommended).            \
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\
-        Please report any issues at https://github.com/PanosFirmpas/bamToBigWig       \
+        Please report any issues/requests at github.com/PanosFirmpas/bamToBigWig      \
         """, add_help=False)
-    req = parser.add_argument_group('required arguments')
+    req = parser.add_argument_group('rRequired arguments')
 
     req.add_argument('-b', '--bam', nargs='+', type=str, metavar='', help='''
                        The input .bam file. Must be sorted and indexed.
@@ -391,39 +390,36 @@ def main():
                        works on the chromosomes found in this file, so if you want to create a bigwig with only 
                        some chromosomes included, edit this input file accordingly.''')
 
-    opt = parser.add_argument_group('optional arguments')
+    flt = parser.add_argument_group('Optional arguments - Filtering')
 
-    opt.add_argument('-o', '--out', type=str, metavar='', help="""
-                        The output .bw file. If not given, it will be /path/to/input(.bam).bw""")
-
-    opt.add_argument('-q', '--q', type=int, default = None,metavar='', help="""
+    flt.add_argument('-q', '--q', type=int, default = None,metavar='', help="""
                         Only include reads with mapping quality >= this option. Default is None, no q filter is applied.""")
 
-    opt.add_argument('-f', '--filter_lc', type=int, default = 2,metavar='', help="""
+    flt.add_argument('-f', '--filter_lc', type=int, default = 2,metavar='', help="""
                        Only include reads with all bits of this argument set in their flag. Default is 2,
                        only reads mapped as "proper pair" are used. See --explain_flags""")
 
-    opt.add_argument('-F','--filter_uc', type=int, default = 4, metavar='', help="""
+    flt.add_argument('-F','--filter_uc', type=int, default = 4, metavar='', help="""
                        Only include reads with none of the bits of this argument set in their flag. Default is 4, which 
                        filters out unmapped reads. If you don't want ANY such filter, you can set this option to 0 but this 
                        will likely cause the program to crash and burn since unmapped reads don't have some needed parameters like 
                        an alignment position. See --explain_flags for some more information.""")
 
-    opt.add_argument('-tlu','--t_len_upper', type=int, default = None,metavar='', help="""
+    flt.add_argument('-tlu','--t_len_upper', type=int, default = None,metavar='', help="""
                        Sets filtering so that only reads with absolute(tlen) lower than this are accepted.
                        This field is set by the mapper, but for paired-end sequencing it will typically refer to the
                        distance from the start of the + strand mapped read to the end of its - strand mapped mate. 
                        For ATAC experiments, setting this to approximately 120, will visualize
                        the "nucleosome free" reads. Default is "None", no fragment size filter is applied.""")
     
-    opt.add_argument('-tll', '--t_len_lower', type=int, default = None,metavar='', help="""
+    flt.add_argument('-tll', '--t_len_lower', type=int, default = None,metavar='', help="""
                        Sets filtering so that only reads with absolute(tlen) greater than this are accepted.
                        See also --t_len_upper""")
 
-    opt.add_argument('-p', '--procs', type=int, default=4, help="""
-                       The number of processors to use. Defaults to 4. Workload is balanced by chromosomes.""")
+    shi = parser.add_argument_group('Optional arguments - Shifting/Extending')
 
-    opt.add_argument('-sh', '--shift', type=int, default=-35, metavar='', help="""
+
+    shi.add_argument('-sh', '--shift', type=int, default=-35, metavar='', help="""
                         Arbitrary shift in bp. This value is used to move cutting ends (5') towards 5'->3'.
                         When this value is negative, ends will be moved toward 3'->5' direction.
                         If you want to extend the signal downstream of the original cutting end,
@@ -435,7 +431,7 @@ def main():
                         will extend the signal by 35bp around the cutting end.
                         NOTE: this is different than the --atac option, or the --shift_p/shift_n options, and is applied on top of them.""")
 
-    opt.add_argument('-exts', '--extsize', type=str, default='70', metavar='', help="""
+    shi.add_argument('-exts', '--extsize', type=str, default='70', metavar='', help="""
                         Arbitrary extension size in bp. 
                         This value is used to extend each read towards the 3' end.  
                         Can be usefully combined with --shift. The default value is 70 
@@ -443,16 +439,24 @@ def main():
                         by 35bp upstream and downstream of the original cutting end.
                         If this is set to 'fragment', reads will be extended until their mate.""")
 
-    opt.add_argument('-sh_p', '--shift_p', type=int, default=0, metavar='', 
+    shi.add_argument('-sh_p', '--shift_p', type=int, default=0, metavar='', 
                         help="Like --shift (and applied on top of it), but only applied to reads that map on the positive strand.")
 
-    opt.add_argument('-sh_n', '--shift_n', type=int, default=0, metavar='', 
+    shi.add_argument('-sh_n', '--shift_n', type=int, default=0, metavar='', 
                         help="Like --shift (and applied on top of it), but only applied to reads that map on the negative strand.")
 
-    opt.add_argument('-atac', '--atac', action='store_true', default=False, help="""
+    shi.add_argument('-atac', '--atac', action='store_true', default=False, help="""
                         Shift reads mapping to the plus strand by +4 (5'->3') and reads that map
                         on the minus strand by +5 (5'-> 3'). This centers the cutting ends on the center of the
                         transposase 'event'. Overwrites --shift_p to 4 and --shift_n to 5""")
+    
+    opt = parser.add_argument_group('Optional arguments - Others')
+
+    opt.add_argument('-p', '--procs', type=int, default=4, help="""
+                       The number of processors to use. Defaults to 4. Workload is balanced by chromosomes.""")
+    
+    opt.add_argument('-o', '--out', type=str, metavar='', help="""
+                        The output .bw file. If not given, it will be /path/to/input(.bam).bw""")
 
     opt.add_argument('-split', '--split_strands', action='store_true', default=False, help="""
                         Output separate files for + strand and - strand. They will automatically 
@@ -461,6 +465,7 @@ def main():
 
     opt.add_argument('-maxZ', '--maxzooms', type=int, default=10, metavar='', help=argparse.SUPPRESS)
     opt.add_argument('-shmb', '--shm_backend', type=str, default="shm://", metavar='', help=argparse.SUPPRESS)
+    opt.add_argument('-n', '--dryrun', action='store_true', default=False, help=argparse.SUPPRESS)
                         
     opt.add_argument('-h', '--help', action='store_true', default=False,
                         help=argparse.SUPPRESS)
@@ -561,7 +566,7 @@ def main():
 
     # bam input
     assert args.bam is not None, "You need to specify an input bam file !"
-    args.bam = [x for y in args.bam for x in glob(y)]
+    args.bam = [x for y in args.bam for x in glob(os.path.expandvars(os.path.expanduser(y)))]
     for bamfp in args.bam:
         accepted,err = accept_as_input(bamfp)
         if not accepted:
@@ -583,15 +588,19 @@ def main():
     if args.name.endswith(".bw"):
         args.name = args.name[:-3]
 
+    bwpl = []
     # split strands
     if args.split_strands:
         args.bw_p_path = os.path.join( args.pathto, args.name+"_pstrand.bw")
         args.bw_n_path = os.path.join( args.pathto, args.name+"_nstrand.bw")
         assert ~os.path.isfile(args.bw_p_path),"Output file [{}] already exists.".format(args.bw_p_path)
         assert ~os.path.isfile(args.bw_n_path),"Output file [{}] already exists.".format(args.bw_n_path)
+        bwpl.append(args.bw_p_path)
+        bwpl.append(args.bw_n_path)
     else:
         args.bw_path = os.path.join( args.pathto, args.name+".bw")
         assert ~os.path.isfile(args.bw_path),"Output file [{}] already exists.".format(args.bw_path)
+        bwpl.append(args.bw_path)
         
     # extsize
     if "fragment" == args.extsize:
@@ -626,8 +635,41 @@ def main():
     # verbose print
     args.vprint = print if args.verbose else lambda *a, **k: None
 
-    bamtobw(args)
+
+    args.vprint("Arguments: ", file=sys.stdout)
+    args.vprint("", file=sys.stdout)
+    args.vprint("chromInfo file: \t {}".format(args.chrominfo), file=sys.stdout)
+    args.vprint("ATAC mode: \t {}".format("True" if args.atac else "False"), file=sys.stdout)
+    args.vprint("Split strands: \t {}".format("True" if args.split_strands else "False"), file=sys.stdout)
+    args.vprint("Processors to use: \t {}".format(args.procs), file=sys.stdout)
+    args.vprint("BigWig maxZooms: \t {}".format(args.maxzooms), file=sys.stdout)
+    args.vprint("", file=sys.stdout)
+    # args.vprint("{} ".format(args.shm_backend), file=sys.stdout)
+    args.vprint("Mapping Quality lower limit: \t {}".format(args.q), file=sys.stdout)
+    args.vprint("Fragment Length uper limit: \t {}".format(args.t_len_upper), file=sys.stdout)
+    args.vprint("Fragment Length lower limit: \t {}".format(args.t_len_lower), file=sys.stdout)
+    args.vprint("-f flag: \t {}".format(args.filter_lc), file=sys.stdout)
+    args.vprint("-F flag: \t {}".format(args.filter_uc), file=sys.stdout)
+    args.vprint("", file=sys.stdout)
+    args.vprint("Extend by: \t {}".format(args.extsize), file=sys.stdout)
+    args.vprint("Shift all reads by: \t {}".format(args.shift), file=sys.stdout)
+    args.vprint("Shift + reads by: \t {}".format(args.shift_p), file=sys.stdout)
+    args.vprint("Shift - reads by: \t {}".format(args.shift_n), file=sys.stdout)
+    args.vprint("", file=sys.stdout)
+
+    args.vprint("", file=sys.stdout)
+    for enum,fp in enumerate(args.bam):
+        args.vprint("Bam input file[{}]: {} ".format(enum, fp), file=sys.stdout)
+    for enum,fp in enumerate(bwpl):
+        args.vprint("Output file[{}]: {} ".format(enum, fp), file=sys.stdout)
+    
+
+
+
+    if not args.dryrun:
+        bamtobw(args)
 
 
 if __name__ == "__main__":
     main()
+

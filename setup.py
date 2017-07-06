@@ -18,7 +18,7 @@ setup(
     keywords = "bam bigwig genomic signal",
     url = "https://github.com/PanosFirmpas/bamToBigWig",
     packages=[''],
-    install_requires=['numpy', 'pysam', 'pyBigWig', 'SharedArray'],
+    install_requires=['numpy', 'pysam', 'pyBigWig', 'SharedArray'],    
     long_description=read('README.md'),
     scripts=['scripts/bamToBigWig'],
     classifiers=[
