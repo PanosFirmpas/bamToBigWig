@@ -186,8 +186,8 @@ def yield_bedgraph_fields(dee):
         if valchange ==0:
             continue
         else:
-            if val>0 and nextpoint>0  and start >=0:
-                yield ( start, nextpoint, val)
+            if val>0 and nextpoint>0 :
+                yield ( max([0,start]), nextpoint, val)
             elif val<0:
                 vprint("value under zeros shouldnt happen", file=sys.stderr)
             start = nextpoint
