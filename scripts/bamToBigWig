@@ -2,8 +2,7 @@
 """Create a bigwig file with signal derived from a sorted and indexed bam file."""
 ###############################################################################
 ## bamToBigWig
-## Create a bigwig file with signal derived from a sorted and indexed bam file.
-## Copyright (C) 2016  Panos Firmpas
+## Copyright (C) 2016  Panos Firbas
 ## This program is free software: you can redistribute it and/or modify
 ## it under the terms of the GNU General Public License as published by
 ## the Free Software Foundation, either version 3 of the License, or
@@ -14,46 +13,36 @@
 ## GNU General Public License for more details.
 ## You should have received a copy of the GNU General Public License
 ###############################################################################
-
 from __future__ import print_function
 
-from itertools import islice
 from multiprocessing import Lock, Pool
 import argparse
 import os
 import sys
+import uuid
+from glob import glob
 
 import numpy as np
 import pysam
-
-if os.name == 'posix' and sys.version_info[0] < 3:
-    try:
-        import subprocess32 as subp
-    except ImportError:
-        import subprocess as subp
-else:
-    import subprocess as subp
+import pyBigWig
+import SharedArray as sha
 
 
-def which(program):
-    """Find out if "program" is available in the path.
+def accept_as_input(bamfp):
+    '''Tests proposed input bam file paths for some things'''
 
-    http://stackoverflow.com/questions/377017/test-if-executable-exists-in-python
-    """
-    def is_exe(fpath):
-        return os.path.isfile(fpath) and os.access(fpath, os.X_OK)
+    pathto, name = os.path.split(bamfp)
+    if pathto == "": pathto = "."
+    assert os.path.exists(pathto),"This path [{}] doesn't exist".format(pathto)
 
-    fpath, fname = os.path.split(program)
-    if fpath:
-        if is_exe(program):
-            return program
-    else:
-        for path in os.environ["PATH"].split(os.pathsep):
-            path = path.strip('"')
-            exe_file = os.path.join(path, program)
-            if is_exe(exe_file):
-                return exe_file
-    return None
+    bamfp = os.path.join( pathto, name)
+    if not os.path.isfile(bamfp):
+        return False, "Designated input file {} doesn't seem to exist".format(bamfp)
+
+    if not os.path.exists(bamfp + ".bai"):
+        return False, "Input file {} doesn't seem to be indexed (I can't find the relevant .bai file), please index it with 'samtools index'".format(bamfp)
+
+    return True,None
 
 
 class FlagFilter():
@@ -61,9 +50,7 @@ class FlagFilter():
     is to only ever expose one filtering fuction for the reads and
     not to have unnecessary elifs and clutter.
     It is a bit hacky but fun.
-    I guess this could very well be just a function... TODO !
     """
-
     def __init__(self, args):
         if args.filter_lc and args.filter_uc:
             self.filter_func = self.both(args)
@@ -73,19 +60,16 @@ class FlagFilter():
             self.filter_func = self.uc(args)
         else:
             self.filter_func = lambda x: True
-
     def both(self, args):
         flc = args.filter_lc
         fuc = args.filter_uc
         return lambda x: ((x & flc) == flc) and ((x & fuc) == 0)
-
     def lc(self, args):
         flc = args.filter_lc
         return lambda x: (x & flc) == flc
     def uc(self, args):
         fuc = args.filter_uc
         return lambda x: ((x & fuc) == 0)
-
 class FragFilter():
     """This class instantiates a filter based on the args. The idea
     is to only ever expose one filtering fuction for the reads and
@@ -99,23 +83,28 @@ class FragFilter():
             self.filter_func = self.uc(args)
         else:
             self.filter_func = lambda x: True
-
     def both(self, args):
         tll = args.t_len_lower
         tlu = args.t_len_upper
         return lambda x: (x >= tll) and (x <= tlu)
-
     def lc(self, args):
         tll = args.t_len_lower
         return lambda x: (x >= tll)
-
     def uc(self, args):
         tlu = args.t_len_upper
         return lambda x: (x <= tlu)
 
-
-def yield_chunks(args, chrom):
-    bam = pysam.AlignmentFile(args.bam)
+def get_extension_sites(args, chrom):
+    """
+    Opens the bam file and gets reads for one chromosome
+    Returns dp for reads in the + strand and dn for reads in the - strand
+    If extsize is a digit, dn reads are shifted 5-->3 by extsize.
+    That way we can just extend every read in one direction in the next steps.
+    """
+    chromsize = args.chrom_size.get(chrom)
+    _extend = args.extsize
+    
+    bams = [pysam.AlignmentFile(bamfp) for bamfp in args.bam]
     # ff is a function that gets instantiated based on
     # the arguments. It returns True for acceptable reads
     f = FlagFilter(args)
@@ -135,220 +124,243 @@ def yield_chunks(args, chrom):
     # p strand constant
     ps_const = args.shift + args.shift_p
     # n strand constant
-    # The +1 puts the CUT in the appropriate position, since otherwise the
-    # position refers to the last mapped nucleotide of a - strand read.
-    # the cut then is to the right of that nucleotide
-    ns_const = - args.shift - args.shift_n - args.extsize + 1
-
-    # This 'worker' will go through all the reads,
-    # and with thoe reads that pass the various filters
+    if 'fragment'== _extend:
+        ns_const = -args.shift - args.shift_n
+    else:
+        ns_const = -args.shift - args.shift_n - _extend 
+        
+    # This will go through all the reads,
+    # and with the reads that pass the various filters
     # it will create a dictionary
-    # where d = { position: NumberofCuts }
-    d = {}
-    for read in bam.fetch(chrom, 0, args.chrom_size[chrom]):
-        if ff(read.flag) and ffr(abs(read.template_length)) and fq(read.mapping_quality):
-            if read.is_reverse:
-                dpos = read.reference_end + ns_const
-                d[dpos] = d.get(dpos, 0) + 1
-            else:
-                dpos = read.reference_start + ps_const
-                d[dpos] = d.get(dpos, 0) + 1
+    # where d = { position: NumberofExtentionSites }
+    dp = {}
+    dn = {}
+    for enum,bam in enumerate(bams):
+        try:
+            for read in bam.fetch(chrom, 0, chromsize, multiple_iterators=True):    
+                if ff(read.flag) and ffr(abs(read.template_length)) and fq(read.mapping_quality):
+                    if read.is_reverse:
+                        # http://pysam.readthedocs.io/en/latest/api.html
+                        # reference_end points to one past the last aligned residue. 
+                        # Returns None if not available (read is unmapped or no cigar alignment present).
+                        dpos = read.reference_end + ns_const                       
+                        dn[dpos] = dn.get(dpos, 0) + 1
+                    else:
+                        dpos = read.reference_start + ps_const
+                        dp[dpos] = dp.get(dpos, 0) + 1
+        except ValueError:
+            args.vprint("{} (found in the chrom-info file) doesn't exist in the bam file {} ".format(chrom, args.bam[enum]), file=sys.stderr)
+        bam.close()
+    args.vprint("Finished reading from {}. Found {} reads in the + strand and {} in the -".format(chrom, sum(dp.values()),sum(dn.values())), file=sys.stdout )
+    return dp, dn
 
-    # Now that we have the dictionary
-    # we can cast it in an iterable of tuples
-    # Which we sort. This guarantees that
-    # we are actually walking through the chromosome from its start
-    # to its end, and we get the positions with cuts in proper order
+def split_bgf(bgf):
+    """Takes am iterable of tuples [(start,end, value),(start,end, value),...] 
+    and returns three numpy arrays, starts, ends and values.
+    """
+    starts, ends, values = zip(*bgf)
+    starts = np.array(starts, dtype= np.int64)
+    ends = np.array(ends, dtype= np.int64)
+    values = np.array(values, dtype= np.float64)
+    
+    return starts,ends,values
 
-    pairs = iter(sorted(d.items()))
+def cuts_d_extend(d, extend):
+    '''Convert d into dee'''
+    ed = { k+extend+1 : v*-1 for k,v in d.items()}
+    dee = { k: d.get(k,0)+ed.get(k,0)  for k in set(d.keys()).union( set( ed.keys())) }
+    del ed
+    return dee
 
-    del d
+def yield_bedgraph_fields(dee):
+    '''Takes dee which stores positions and increase/decrease in signal
+    and outputs (start, end, value) of signal
+    The core of the "algorithm"
+    '''
+    ipoints = iter(sorted(dee.keys()))
+    start = next(ipoints)
+    val = dee.get(start, 0)
 
-    chunk = [pairs.next()]
-    cpos = chunk[0][0]
-
-    # A chunk is a collection (tuple) of position:numberofcuts pairs.
-    # Since we only add signal to a certain range AFTER a 'cut'
-    # [Note that the actual cutting sites have been moveed in the previous step,
-    # the cuts in "pairs" are the positions from which we will add X bases of signal downstream]
-    # we seggregate the positions in chunks where there is no greater distance between
-    # each chunk than 'max_dist'
-
-    # This allows the on-the-fly creation of a healthy wiggle file
-    # since we don't want our wiggle to be full of zeroes
-    max_dist = args.extsize + (args.bucket_size - 1)
-
-    # so this bit of code here goes through all the pairs
-    # and yields them in 'chunks'
-    # Each chunk will be one "wiggle field"
-    for pair in pairs:
-        if pair[0] >= cpos + max_dist:
-            yield chunk
-            chunk = [pair]
-            cpos = pair[0]
+    for nextpoint in ipoints:
+        valchange = dee.get(nextpoint, 0)
+        if valchange ==0:
+            continue
         else:
-            chunk.append(pair)
-            cpos = pair[0]
-    # yield the last chunk
-    yield chunk
+            if val>0 and nextpoint>0  and start >=0:
+                yield ( start, nextpoint, val)
+            elif val<0:
+                vprint("value under zeros shouldnt happen", file=sys.stderr)
+            start = nextpoint
+            val += valchange
 
-
-def split_every(n, iterable):
-    """splits an iterable every n values"""
-    i = iter(iterable)
-    piece = list(islice(i, n))
-    while piece:
-        yield piece
-        piece = list(islice(i, n))
-
-
-def yield_windows(args, chrom):
-    '''In here we go from cut positions (not EXACTLY cuts but anyway)
-    to windows of signal, each window will become one wiggle field'''
-    chromsize = args.chrom_size.get(chrom)
-
-    for chunk in yield_chunks(args, chrom):
-        # window length
-        wl = (chunk[-1][0] - chunk[0][0]) + args.extsize
-        # window start
-        ws = chunk[0][0]
-        # the window itsself, a np array
-        w = np.zeros(wl)
-
-        wse = - ws + args.extsize
-        for c, v in chunk:
-            w[c - ws: c + wse] += v
-
-        # this shouldnt happen, right? (It can happen if a read is near 0, thanks to shifts)
-        if ws < 0:
-            w = w[abs(ws):]
-            ws = 0
-        # hm, should I emulate bedtools and just sys.exit for no apparent reason ?
-        if ws >= chromsize:
-            continue
-        # chop the window a bit if it exceeds chromosome size
-        extra = (ws + len(w)) - chromsize
-        if extra > 0:
-            w = w[:-extra]
-        # ufff
-        if w.size == 0:
-            continue
-
-        # We have been 0-based so far
-        # but wiggle is 1-based soooooo:
-        yield ws + 1, w
-
-
-def yield_window_str(args, chrom):
-    '''String-format our windows'''
-
-    st = args.bucket_size
-    # we fill in the chrom and step
-    cline = "fixedStep  chrom={}  start={{}} step={} span={}\n{{}}\n".format(chrom, st, st)
-    # cline woman (cline), she drink coffee (cline), she drink tea (cline) [...]
-
-    # squeeze a tiny bit more speed (ballsToTheWall)
-    clinef = cline.format
-
-    for ws, w in yield_windows(args, chrom):
-        # reform the window if buckets
-        if st > 1:
-            w = np.array([np.mean(x) for x in split_every(st, w)])
-
-        # transform the values to a string with one value per line
-        vl = '\n'.join(w.astype(str))
-        # make a string with the cline and the values
-        wiggle_field = clinef(ws, vl)
-
-        yield wiggle_field
-
-
-
-def one_worker((args, chrom)):
-    '''Each core will do this'''
-
-    # This starts the cascade of iterators (yield_window_str --> yield_windows --> yield_chunks)
-    # And ends with a big string
-    toprint = "".join(yield_window_str(args, chrom))
-
-    # Then we get the lock, write our bit string to the output and flush (flush is very important)
-    with lock:
-        wtbwpipe.write(toprint)
-        wtbwpipe.flush()
-
-    return '{} done!'.format(chrom)
-
-
-def poolinit(l, p):
+def poolinit(arguments):
     """
     Initializes the pool and makes l and p globals among all the processes.
 
     http://stackoverflow.com/questions/25557686/python-sharing-a-lock-between-processes
     """
-    global lock
-    global wtbwpipe
-    lock = l
-    wtbwpipe = p
+    global gargs
+    gargs = arguments
 
+def to_shm(dee, schmeckle):
+    '''Orders the convertion of dee to bedgraffields and then
+    puts the bedgraffields in the shared memory'''
+    try:
+        starts,ends,values = zip(*yield_bedgraph_fields(dee))
+        size = len(starts)
 
-# def singledude(args):
-#     fo = open( args.out, "w")
+        sha_starts = sha.create( schmeckle.format("starts"), size, dtype = np.int64)
+        sha_ends = sha.create( schmeckle.format("ends"), size, dtype = np.int64)
+        sha_values = sha.create( schmeckle.format("values"), size, dtype = np.float64)
 
-#     # get the chromosomes sorted by size, from the chrominfo file
-#     loc = []
-#     with open(args.chrominfo, "r") as fi:
-#         for line in fi:
-#             c, v = line.rstrip().split("\t")[:2]
-#             loc.append((c, int(v)))
-#     chroms = [x[0] for x in sorted(loc, reverse=True, key=lambda x: x[1])]
-#     args.chrom_size = dict(loc)
+        sha_starts[:] = starts
+        sha_ends[:] = ends
+        sha_values[:] = values
+        
+        del starts, ends, values
+    except:
+        return 1
+    return 0
+    
 
-#     for chrom in chroms:
-#         toprint = "".join(yield_window_str(args, chrom))
-#         fo.write(toprint)
-#     fo.close()
+def worker(chrom):
+    '''
+    A pool worker.
+    Handles one chromosome.
+    Gets the reads with get_extension_sites
+    makes a unique schmeckle string in /dev/shm with the SharedArray library
+    Then gets bedgraph fields and stores them in the shared memory,
+    in the unique schmeckle filename.
+    Returns the chrom and schmeckle so that the parent process
+    knows which data to retrieve for this chrom.
+    Precisely returns [chrom, smek1, smek2], smek1 and 2 cant be None
+    '''
 
+    dp,dn = get_extension_sites(gargs,chrom)
+    myuuid = uuid.uuid4()
+    _extend = gargs.extsize
+    
+    schmeckle = "{}bam2bw_{}_{}_{}_{}".format(gargs.shm_backend, myuuid, "{}", chrom, "{}")
+    ret = [chrom,None,None]
+    if "fragment" == _extend:
+        if not {} == dp:
+            schmeckle1 =  schmeckle.format("c","{}")
+            assert sum(dp.values()), sum(dn.values())
+            ed = {k: v*-1 for k,v in dn.items()}
+            dee = { k: dp.get(k,0)+ed.get(k,0)  for k in set(dp.keys()).union( set( ed.keys())) }
+            
+            err = to_shm(dee, schmeckle1 )
+            if not err:
+                ret[1] = schmeckle1        
+    else:
+        if gargs.split_strands:
+            schmeckle1 =  schmeckle.format("p","{}")
+            schmeckle2 =  schmeckle.format("n","{}")
+            if not {} == dp:
+                err = to_shm(cuts_d_extend(dp, _extend),  schmeckle1 )
+                if not err:
+                    ret[1] = schmeckle1
+
+            if not {} == dn:
+                err = to_shm(cuts_d_extend(dn, _extend), schmeckle2 )
+                if not err:
+                    ret[2] = schmeckle2
+        else:
+            dc = {k: dp.get(k,0) + dn.get(k,0) for k in set(dp.keys()).union(dn.keys()) }
+            schmeckle1 =  schmeckle.format("c","{}")
+            # del dp, dn
+
+            if not {} == dc:
+                err = to_shm(cuts_d_extend(dc, _extend),  schmeckle1 )
+                if not err:
+                    ret[1] = schmeckle1
+
+    gargs.vprint("Wrote {} to shared mem".format(chrom), file=sys.stdout)
+    return ret
+            
+def shm_to_pybw_manager(chrom, schmeckle, bwl, args):
+    '''Run by the manager process, reads data ffrom the shared memorry
+    puts them in the pybw object'''
+    smek1,smek2 = schmeckle
+    if args.split_strands and len(bwl)==2:
+        if smek1:
+            shm_to_pybw(chrom, smek1, bwl[0], args)
+        if smek2:
+            shm_to_pybw(chrom, smek2, bwl[1], args)
+
+    elif (not args.split_strands) and len(bwl)==1:
+        if smek1:
+            shm_to_pybw(chrom, smek1, bwl[0], args)
+    else:
+        sys.exit("CATASTROPHIC FAILURE.")
+
+    return 0
+
+def shm_to_pybw(chrom, schmeckle, bw, largs):
+    try:
+        sha_starts = sha.attach( schmeckle.format( "starts") )
+        sha_ends = sha.attach( schmeckle.format( "ends") )
+        sha_values = sha.attach( schmeckle.format( "values") )
+        mysize = len(sha_starts)
+        bw.addEntries([chrom]*mysize, sha_starts, ends=sha_ends, values=sha_values)
+        largs.vprint("Wrote {} entries in chromosome {}".format(mysize, chrom), file=sys.stdout)
+
+        sha.delete( schmeckle.format( "starts") )
+        sha.delete( schmeckle.format( "ends") )
+        sha.delete( schmeckle.format( "values") )
+    except FileNotFoundError:
+        largs.vprint("fnf: {}".format(schmeckle.format( "{}")), file=sys.stderr)
+        pass
 
 def bamtobw(args):
+    '''The master process, 
+        Handles the pybiwwig object,
+        makes the pool
+        reads the results from the shared memory
+        puts them in the pybw object
+        then closes it'''
+    if args.split_strands:
+        bw_p = pyBigWig.open(args.bw_p_path, "w")
+        bw_p.addHeader( sorted(list(args.chrom_size.items())), maxZooms=args.maxzooms)
+        bw_n = pyBigWig.open(args.bw_n_path, "w")
+        bw_n.addHeader( sorted(list(args.chrom_size.items())), maxZooms=args.maxzooms)
+        bwl = [bw_p, bw_n]
 
-    # get the chromosomes sorted by size, from the chrominfo file
-    loc = []
-    with open(args.chrominfo, "r") as fi:
-        for line in fi:
-            c, v = line.rstrip().split("\t")[:2]
-            loc.append((c, int(v)))
-    chroms = [x[0] for x in sorted(loc, reverse=True, key=lambda x: x[1])]
-    args.chrom_size = dict(loc)
-
-    # where will I write to
-    if not args.towig:
-        wtbw = subp.Popen(
-            ["wigToBigWig", "-clip", "stdin", args.chrominfo, args.out],
-            stdin=subp.PIPE,
-            stdout=subp.PIPE)
-        iwriteto = wtbw.stdin
     else:
-        iwriteto = open(args.out, "w")
+        bw = pyBigWig.open(args.bw_path, "w")    
+        bw.addHeader( sorted(list(args.chrom_size.items())) , maxZooms=args.maxzooms)
+        bwl = [bw]
+            
+    CL = iter(sorted(args.chrom_size.keys()))       
+    iterabull = iter(sorted(args.chrom_size.keys()))       
+        
+    pool = Pool(min(args.procs - 1,1), initializer=poolinit, initargs=(args, ))
+    
+    cache = {}
+    nextC = next(CL)
+    for donechrom,smek1,smek2 in pool.imap_unordered(worker, iterabull, chunksize=1) :
+        if donechrom == nextC:
+            #get results for chrom from shm and put in bw file 
+            shm_to_pybw_manager(donechrom, (smek1,smek2), bwl, args)
+            try:
+                nextC = next(CL)
+                while nextC in cache:
+                    # get results for chrom from shm and put in bw file
+                    shm_to_pybw_manager(nextC, cache[nextC], bwl, args)
+                    nextC = next(CL)
 
-    iterabull = [(args, x) for x in chroms]
-    l = Lock()
-    pool = Pool(args.procs - 1, initializer=poolinit, initargs=(l, iwriteto, ))
-
-    for message in pool.imap_unordered(one_worker, iterabull):
-        pass
+            except StopIteration:
+                pass
+        else:
+            cache[donechrom] = smek1,smek2
 
     pool.close()
     pool.join()
+       
+    for bwfh in bwl:
+        bwfh.close()
 
-    if not args.towig:
-        wtbw.stdin.close()
-        wtbw.wait()
-    else:
-        iwriteto.close()
-
-
-if __name__ == '__main__':
-    # Define the Argparse 'things'
+def main():
 
     parser = argparse.ArgumentParser(description="""
         Create a bigwig file with signal derived from a sorted and indexed bam file.  \
@@ -356,7 +368,6 @@ if __name__ == '__main__':
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\
         Reads can be filtered with -f and/or -F which work like in "samtools view".   \
         Try the option --explain_flags for more help with this.                       \
-        Reads can also be filtered by a lower/upper limit for tlen. See --t_len_upper \
         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\
         The reads can be shifted by --shift towards 5'->3' before being expanded by   \
         --extsize to expand their coverage. Try --coverage_examples for more help. You\
@@ -369,11 +380,14 @@ if __name__ == '__main__':
         """, add_help=False)
     req = parser.add_argument_group('required arguments')
 
-    req.add_argument('-b', '--bam', type=str, metavar='', help='The input .bam file. Must be sorted and indexed.')
+    req.add_argument('-b', '--bam', nargs='+', type=str, metavar='', help='''
+                       The input .bam file. Must be sorted and indexed.
+                       You can give more than one input files, separated by space, or even 
+                       a wilcard expression, encased in quotation marks(e.g.,"./replicate*.bam"). ''')
 
     req.add_argument('-chr', '--chrominfo', type=str, metavar='', help='''
                        A two column |<chromosome name> <total_length>| txt file.
-                       Required by wigToBigWig. The chromosome names must match those on the bam file. bamToBigWig only 
+                       The chromosome names must match those on the bam file. bamToBigWig only 
                        works on the chromosomes found in this file, so if you want to create a bigwig with only 
                        some chromosomes included, edit this input file accordingly.''')
 
@@ -385,9 +399,9 @@ if __name__ == '__main__':
     opt.add_argument('-q', '--q', type=int, default = None,metavar='', help="""
                         Only include reads with mapping quality >= this option. Default is None, no q filter is applied.""")
 
-    opt.add_argument('-f', '--filter_lc', type=int, default = None,metavar='', help="""
-                       Only include reads with all bits of this argument set in their flag. Default is None,
-                       no read filter is applied. See --explain_flags""")
+    opt.add_argument('-f', '--filter_lc', type=int, default = 2,metavar='', help="""
+                       Only include reads with all bits of this argument set in their flag. Default is 2,
+                       only reads mapped as "proper pair" are used. See --explain_flags""")
 
     opt.add_argument('-F','--filter_uc', type=int, default = 4, metavar='', help="""
                        Only include reads with none of the bits of this argument set in their flag. Default is 4, which 
@@ -401,16 +415,15 @@ if __name__ == '__main__':
                        distance from the start of the + strand mapped read to the end of its - strand mapped mate. 
                        For ATAC experiments, setting this to approximately 120, will visualize
                        the "nucleosome free" reads. Default is "None", no fragment size filter is applied.""")
+    
     opt.add_argument('-tll', '--t_len_lower', type=int, default = None,metavar='', help="""
                        Sets filtering so that only reads with absolute(tlen) greater than this are accepted.
                        See also --t_len_upper""")
 
     opt.add_argument('-p', '--procs', type=int, default=4, help="""
-                       The number of processors to use. Defaults to 4. One of those 
-                       processors with be consumed by the wigToBigWig process. After that, each available 
-                       processor works on one chromosome at a time until all chromosomes are done.""")
+                       The number of processors to use. Defaults to 4. Workload is balanced by chromosomes.""")
 
-    opt.add_argument('-sh', '--shift', type=int, default=-3, metavar='', help="""
+    opt.add_argument('-sh', '--shift', type=int, default=-35, metavar='', help="""
                         Arbitrary shift in bp. This value is used to move cutting ends (5') towards 5'->3'.
                         When this value is negative, ends will be moved toward 3'->5' direction.
                         If you want to extend the signal downstream of the original cutting end,
@@ -418,16 +431,17 @@ if __name__ == '__main__':
                         and --extsize to how much you want to extend. If on the other hand you want to
                         extend the signal to both sides of the cutting end, for example if you are visualizing
                         ATACseq or DNAse-seq, you will want to set this to some negative value.
-                        The default value -3 in combination with the default value of --extsize 7
-                        will extend the signal by 3bp around the cutting end.
+                        The default value -35 in combination with the default value of --extsize 70
+                        will extend the signal by 35bp around the cutting end.
                         NOTE: this is different than the --atac option, or the --shift_p/shift_n options, and is applied on top of them.""")
 
-    opt.add_argument('-exts', '--extsize', type=int, default=7, metavar='', help="""
+    opt.add_argument('-exts', '--extsize', type=str, default='70', metavar='', help="""
                         Arbitrary extension size in bp. 
-                        This value is used to extend each read towards 3' end.  
-                        Can be usefully combined with --shift. The default value is 7 
-                        which in combination with the default --shift -3 extends the signal 
-                        by 3bp upstream and downstream of the original cutting end.""")
+                        This value is used to extend each read towards the 3' end.  
+                        Can be usefully combined with --shift. The default value is 70 
+                        which in combination with the default --shift -35 extends the signal 
+                        by 35bp upstream and downstream of the original cutting end.
+                        If this is set to 'fragment', reads will be extended until their mate.""")
 
     opt.add_argument('-sh_p', '--shift_p', type=int, default=0, metavar='', 
                         help="Like --shift (and applied on top of it), but only applied to reads that map on the positive strand.")
@@ -437,16 +451,17 @@ if __name__ == '__main__':
 
     opt.add_argument('-atac', '--atac', action='store_true', default=False, help="""
                         Shift reads mapping to the plus strand by +4 (5'->3') and reads that map
-                        on the minus strand by 5 (5'-> 3'). This centers the cutting ends on the center of the
+                        on the minus strand by +5 (5'-> 3'). This centers the cutting ends on the center of the
                         transposase 'event'. Overwrites --shift_p to 4 and --shift_n to 5""")
-    opt.add_argument('-buck', '--bucket_size', type=int, default=1, metavar='', help=argparse.SUPPRESS)
-    # """This will bucket the signal in -buck sized buckets. This will decrease resolution\
-    # but will run faster and create a smaller sized bw file. \n\
-    # Be advised, this will most probably leave bases with incorrect signal value in the .bw file. Default is 1""")
 
-    opt.add_argument('-towig', '--towig', action='store_true', default=False,
-                        help=argparse.SUPPRESS)
+    opt.add_argument('-split', '--split_strands', action='store_true', default=False, help="""
+                        Output separate files for + strand and - strand. They will automatically 
+                        be named based on the output.bw (output_pstrand.bw / output_nstrand.bw)""")
+    opt.add_argument('-vv', '--verbose', action='store_true', default=False, help="""Prints out some helpful/debugging messages.""")
 
+    opt.add_argument('-maxZ', '--maxzooms', type=int, default=10, metavar='', help=argparse.SUPPRESS)
+    opt.add_argument('-shmb', '--shm_backend', type=str, default="shm://", metavar='', help=argparse.SUPPRESS)
+                        
     opt.add_argument('-h', '--help', action='store_true', default=False,
                         help=argparse.SUPPRESS)
 
@@ -456,7 +471,6 @@ if __name__ == '__main__':
     # ht.add_argument('-exfi','--filter_examples', action='store_true',
     #                     help="Show some examples of filtering reads with their flags and exit.")
     ht.add_argument('-exco', '--coverage_examples', action='store_true', help="Show some examples of filtering reads with their flags and exit.")
-
 
 
     # No arguments given
@@ -471,23 +485,16 @@ if __name__ == '__main__':
         parser.print_help()
         parser.exit()
 
-    # check if wigToBigWig is in the path
-    if not which('wigToBigWig'):
-        print('''This script relies on the ucsc utility wigToBigWig, \n\
-which could not be found in your system. You can get it here:\n\
-http://hgdownload.soe.ucsc.edu/admin/exe/ ''')
-        sys.exit()
-
     # Ok, we parsed our arguments, let's deal with them:
-
     if args.explain_flags:
         print (
             """
     Theory:
     ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
-    Sequencing reads in sam/bam files contain a binary flag, which is a \n\
-    combination of 12 bit-wise flags. They are set by the aligner/mapper. \n\
-    This allows fast and efficient filtering of the reads.\n\n\
+    Sequencing reads in sam/bam files contain a binary flag, which is a       \n\
+    combination of 12 bit-wise flags (i.e. 12 bits that can be 0 or 1).       \n\
+    They are set by the aligner/mapper. This allows fast and efficient        \n\
+    filtering of the reads.\n\n\
     If a read, for example, has its flag set to 2, we can see the bitwise flags\n\
     by converting 2 to its binary representation which is 000000000010 . The  \n\
     second bit/flag is set to 1, so it is True. This means that this imaginary\n\
@@ -537,35 +544,69 @@ http://hgdownload.soe.ucsc.edu/admin/exe/ ''')
     """)
         parser.exit()
 
-    assert args.bam is not None, "You need to specify an input bam file !"
+    
+    # chrominfo
     assert args.chrominfo is not None, "You need to specify an chrom_info file !"
-    assert os.path.exists(args.bam), "Designated input file {} doesn't doesn't seem to exist".format(args.bam)
     assert os.path.isfile(args.chrominfo), "Could not find {}".format(args.chrominfo)
-    assert args.extsize >= 1
+    # get the chromosomes sorted by size, from the chrominfo file
+    try:
+        loc = []
+        with open(args.chrominfo, "r") as fi:
+            for line in fi:
+                c, v = line.rstrip().split("\t")[:2]
+                loc.append((c, int(v)))
+        args.chrom_size = dict(loc)
+    except:
+        sys.exit("Couldn't properly parse the chromInfo file.")
+
+    # bam input
+    assert args.bam is not None, "You need to specify an input bam file !"
+    args.bam = [x for y in args.bam for x in glob(y)]
+    for bamfp in args.bam:
+        accepted,err = accept_as_input(bamfp)
+        if not accepted:
+            sys.exit(err)
 
     # handle output path
-    if args.out:
-        pathto, out = os.path.split(args.out)
-        if pathto == "":
-            pathto = "."
-        assert os.path.exists(pathto), "Designated output path {} doesn't exist".format(pathto)
-
-        if not args.towig:
-            if not out.endswith(".bw"):
-                out = out + ".bw"
-            args.out = os.path.join(pathto, out)
+    if not args.out:
+        if len(args.bam)>1:
+            sys.exit('''\n\n    You have specified more than one input files but no output name (the -o option ).
+    Because of this I cannot decide what to call the output, please specify a name for it with -o.\n\n''')
         else:
-            if not out.endswith(".wig"):
-                out = out + ".wig"
-            args.out = os.path.join(pathto, out)
+            args.out = args.bam[0][:-4] + ".bw"
+            #vrb
+            print("Set output name to ",args.out)
+
+    args.pathto, args.name = os.path.split(args.out)
+    if args.pathto == "": args.pathto = "."
+    assert os.path.exists(args.pathto),"This path [{}] doesn't exist".format(args.pathto)
+    if args.name.endswith(".bw"):
+        args.name = args.name[:-3]
+
+    # split strands
+    if args.split_strands:
+        args.bw_p_path = os.path.join( args.pathto, args.name+"_pstrand.bw")
+        args.bw_n_path = os.path.join( args.pathto, args.name+"_nstrand.bw")
+        assert ~os.path.isfile(args.bw_p_path),"Output file [{}] already exists.".format(args.bw_p_path)
+        assert ~os.path.isfile(args.bw_n_path),"Output file [{}] already exists.".format(args.bw_n_path)
     else:
-        pathto, out = os.path.split(args.bam)
-        if not args.towig:
-            out = out[:-3] + "bw"
-        else:
-            out = out[:-3] + "wig"
-        args.out = os.path.join(pathto, out)
+        args.bw_path = os.path.join( args.pathto, args.name+".bw")
+        assert ~os.path.isfile(args.bw_path),"Output file [{}] already exists.".format(args.bw_path)
+        
+    # extsize
+    if "fragment" == args.extsize:
+        if args.split_strands:
+            print('''\n\n   You have set both "fragment" type extension and "split_strands". \n\n''')
+            sys.exit()
+        pass
+    else:
+        try:
+            args.extsize = int(args.extsize)
+        except:
+            sys.exit("extsize needs to be >= 0 ")
+        assert args.extsize >= 0, "extsize needs to be >= 0 "
 
+    # shifting
     if args.atac:
         if (args.shift_p != 0) or (args.shift_n != 0):
             print('''\n\n   You seem to have set both a specific value for --shift_p or --shift_n
@@ -575,7 +616,6 @@ http://hgdownload.soe.ucsc.edu/admin/exe/ ''')
 
         args.shift_p = 4
         args.shift_n = 5
-
     # this used to default to None so the code was built around that
     # Now that it sensibly defaults to 4, the user would set it to 0
     # to get the same behaviour as None
@@ -583,38 +623,11 @@ http://hgdownload.soe.ucsc.edu/admin/exe/ ''')
     if args.filter_uc == 0:
         args.filter_uc = None
 
+    # verbose print
+    args.vprint = print if args.verbose else lambda *a, **k: None
+
     bamtobw(args)
 
 
-## A little bit of helping code that creates a fake samfile for testing
-## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ## ##
-# import pandas as pd
-# import numpy as np
-# from itertools import cycle
-# chromNames = ['chr1','chr2']
-# chromLengths = [10000,10000]
-# headline = lambda chromName,chromLength : "@SQ\tSN:{}\tLN:{}".format(chromName, chromLength)
-# header = "\n".join([headline(x,y) for x,y in zip(chromNames,chromLengths)])
-# df = pd.DataFrame(columns = ["QNAME","FLAG","RNAME","POS","MAPQ","CIGAR","RNEXT","PNEXT","TLEN","SEQ","QUAL"])
-# df["FLAG"] = np.arange(216)
-# df['POS'] = 100
-# mapqs = cycle(np.arange(0,28))
-# df['MAPQ'] = [next(mapqs) for _ in np.arange(216)]
-# tlens = cycle(np.arange(20,1000,50))
-# df["TLEN"] = [next(tlens) for _ in np.arange(216)]
-# df['QNAME'] = df['FLAG'].apply(lambda x: "{}_yolo".format(x))
-# df['RNAME'] = "chr1"
-# df["CIGAR"] = "49M"
-# df["RNEXT"] = "chr1"
-# df["PNEXT"] = df['POS'] + 50
-# df['SEQ'] = 'A'*49
-# df['QUAL'] = '!'*49
-# with open("fake.sam", 'w') as fo:
-#     fo.write(header)
-#     fo.write("\n")
-#     df.to_csv(fo, sep="\t", index=False, header=False)
-# #samtools view -b fake.sam > fake.bam && samtools sort fake.bam -o fake.s.bam && samtools index fake.s.bam
-
-## This prints binary flags kinda nicely, putting it here cause otherwise ill lose it and i dont want to google it again
-# for i in range(100):
-#     print "{}\t{:0>16b}\t{:0>16b}\t{}".format(i,i,17, (i&17) )
+if __name__ == "__main__":
+    main()
