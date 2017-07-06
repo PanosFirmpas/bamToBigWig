@@ -20,18 +20,14 @@ $ pip install ./bamToBigWig
 ```
 If that does't work, here are more details on installing:
 
-##### 1) Requirements
-bamToBigWig is a python script, so you will need a working installation of python. Thankfully most operating systems these days come with python already installed so this should't be a problem.
-    *    [numpy](http://www.scipy.org/scipylib/download.html) is needed and needs to be installed first.
-            ```
-            $ pip install numpy
-            ```
-            should work.
-    *    [pysam](https://github.com/pysam-developers/pysam) is used to read the input bam file, to install it follow the instructions in the project's page. 
-    *    [pyBigWig](https://github.com/dpryan79/pyBigWig) is used to write the output bw file, to install it follow the instructions in the project's page. 
-    *    [SHaredArray](https://pypi.python.org/pypi/SharedArray) is used for the multiprocessing commuunication.
-    
-    
+##### 1) Requirements    
+bamToBigWig is a python script, so you will need a working installation of python.     
+Thankfully most operating systems these days come with python already installed so this should't be a problem.    
+*    [numpy](http://www.scipy.org/scipylib/download.html) is needed and needs to be installed first.    
+*    [pysam](https://github.com/pysam-developers/pysam) is used to read the input bam file, to install it follow the instructions in the project's page. 
+*    [pyBigWig](https://github.com/dpryan79/pyBigWig) is used to write the output bw file, to install it follow the instructions in the project's page. 
+*    [SHaredArray](https://pypi.python.org/pypi/SharedArray) is used for the multiprocessing commuunication.
+        
 ##### 2) bamToBigWig
 
 Is a single script, so you could just take the script file from the /scripts/ folder and run it from anywhere in your system, as long as the required libraries are available. Since this is packaged as a python package though, you can use the setup.py script to automatically install bamToBigWig in your system.
