@@ -1,4 +1,4 @@
-#! /usr/bin/env
+#! /usr/bin/env python
 """Create a bigwig file with signal derived from a sorted and indexed bam file."""
 ###############################################################################
 ## bamToBigWig
@@ -21,7 +21,7 @@ import os
 import sys
 import uuid
 from glob import glob
-import errno.ENOENT as filenotfoundcode
+from errno import ENOENT as FILENOTFOUNDCODE
 
 import numpy as np
 import pysam
@@ -310,7 +310,7 @@ def shm_to_pybw(chrom, schmeckle, bw, largs):
         sha.delete( schmeckle.format( "ends") )
         sha.delete( schmeckle.format( "values") )
     except OSError as e:
-        if e.errno == filenotfoundcode:
+        if e.errno == FILENOTFOUNDCODE:
             # do your FileNotFoundError code here
             largs.vprint("I expected to find this but couldn't: {}".format(schmeckle.format( "{}")), file=sys.stderr)
             pass
