@@ -1,4 +1,4 @@
-#!/home/ska/panos/b2bwTests/py2/venv/bin/python2
+#! /usr/bin/env
 """Create a bigwig file with signal derived from a sorted and indexed bam file."""
 ###############################################################################
 ## bamToBigWig
@@ -15,12 +15,13 @@
 ###############################################################################
 from __future__ import print_function
 
-from multiprocessing import Lock, Pool
+from multiprocessing import Pool
 import argparse
 import os
 import sys
 import uuid
 from glob import glob
+import errno.ENOENT as filenotfoundcode
 
 import numpy as np
 import pysam
@@ -29,8 +30,7 @@ import SharedArray as sha
 
 
 def accept_as_input(bamfp):
-    '''Tests proposed input bam file paths for some things'''
-
+    """Test proposed input bam file paths for some things."""
     pathto, name = os.path.split(bamfp)
     if pathto == "": pathto = "."
     assert os.path.exists(pathto),"This path [{}] doesn't exist".format(pathto)
@@ -46,12 +46,14 @@ def accept_as_input(bamfp):
 
 
 class FlagFilter():
-    """This class instantiates a filter based on the args. The idea
-    is to only ever expose one filtering fuction for the reads and
-    not to have unnecessary elifs and clutter.
-    It is a bit hacky but fun.
+    """This class instantiates a filter based on the args.
+
+    The idea is to only ever expose one filtering fuction for the reads and
+    not to have unnecessary elifs and clutter. It is a bit hacky but fun.
     """
+
     def __init__(self, args):
+        """Set self.filter_function based on the arguments."""
         if args.filter_lc and args.filter_uc:
             self.filter_func = self.both(args)
         elif args.filter_lc:
@@ -61,20 +63,27 @@ class FlagFilter():
         else:
             self.filter_func = lambda x: True
     def both(self, args):
+        """If both filters exists."""
         flc = args.filter_lc
         fuc = args.filter_uc
         return lambda x: ((x & flc) == flc) and ((x & fuc) == 0)
     def lc(self, args):
+        """Only lowercase filter is set."""
         flc = args.filter_lc
         return lambda x: (x & flc) == flc
     def uc(self, args):
+        """Only uppercase filter is set."""
         fuc = args.filter_uc
         return lambda x: ((x & fuc) == 0)
 class FragFilter():
-    """This class instantiates a filter based on the args. The idea
-    is to only ever expose one filtering fuction for the reads and
-    not to have unnecessary elifs and clutter."""
+    """This class instantiates a filter based on the args.
+
+    The idea is to only ever expose one filtering fuction for the reads and
+    not to have unnecessary elifs and clutter.
+    """
+
     def __init__(self, args):
+        """Set self.filter_function based on the arguments."""
         if args.t_len_lower and args.t_len_upper:
             self.filter_func = self.both(args)
         elif args.t_len_lower:
@@ -84,19 +93,22 @@ class FragFilter():
         else:
             self.filter_func = lambda x: True
     def both(self, args):
+        """If both filters exists."""
         tll = args.t_len_lower
         tlu = args.t_len_upper
         return lambda x: (x >= tll) and (x <= tlu)
     def lc(self, args):
+        """Only lower filter is set."""
         tll = args.t_len_lower
         return lambda x: (x >= tll)
     def uc(self, args):
+        """Only upper filter is set."""
         tlu = args.t_len_upper
         return lambda x: (x <= tlu)
 
 def get_extension_sites(args, chrom):
-    """
-    Opens the bam file and gets reads for one chromosome
+    """Get reads for one chromosome into dp and dn.
+
     Returns dp for reads in the + strand and dn for reads in the - strand
     If extsize is a digit, dn reads are shifted 5-->3 by extsize.
     That way we can just extend every read in one direction in the next steps.
@@ -154,28 +166,18 @@ def get_extension_sites(args, chrom):
     args.vprint("Finished reading from {}. Found {} reads in the + strand and {} in the -".format(chrom, sum(dp.values()),sum(dn.values())), file=sys.stdout )
     return dp, dn
 
-def split_bgf(bgf):
-    """Takes am iterable of tuples [(start,end, value),(start,end, value),...] 
-    and returns three numpy arrays, starts, ends and values.
-    """
-    starts, ends, values = zip(*bgf)
-    starts = np.array(starts, dtype= np.int64)
-    ends = np.array(ends, dtype= np.int64)
-    values = np.array(values, dtype= np.float64)
-    
-    return starts,ends,values
-
 def cuts_d_extend(d, extend):
-    '''Convert d into dee'''
+    """Convert d into dee."""
     ed = { k+extend+1 : v*-1 for k,v in d.items()}
     dee = { k: d.get(k,0)+ed.get(k,0)  for k in set(d.keys()).union( set( ed.keys())) }
     return dee
 
 def yield_bedgraph_fields(dee):
-    '''Takes dee which stores positions and increase/decrease in signal
-    and outputs (start, end, value) of signal
-    The core of the "algorithm"
-    '''
+    """From dictionary of position:signalchange to bedgraph fields.
+
+    Takes dee which stores positions and increase/decrease in signal
+    and outputs (start, end, value) of signal. The core of the "algorithm"
+    """
     ipoints = iter(sorted(dee.keys()))
     start = next(ipoints)
     val = dee.get(start, 0)
@@ -193,8 +195,7 @@ def yield_bedgraph_fields(dee):
             val += valchange
 
 def poolinit(arguments):
-    """
-    Initializes the pool and makes l and p globals among all the processes.
+    """Initialize the pool and make globals among all the processes.
 
     http://stackoverflow.com/questions/25557686/python-sharing-a-lock-between-processes
     """
@@ -202,8 +203,7 @@ def poolinit(arguments):
     gargs = arguments
 
 def to_shm(dee, schmeckle):
-    '''Orders the convertion of dee to bedgraffields and then
-    puts the bedgraffields in the shared memory'''
+    """Convert dee to bedgraph fields and write to shared memory."""
     try:
         starts,ends,values = zip(*yield_bedgraph_fields(dee))
         size = len(starts)
@@ -223,9 +223,8 @@ def to_shm(dee, schmeckle):
     
 
 def worker(chrom):
-    '''
-    A pool worker.
-    Handles one chromosome.
+    """A pool worker that handles one chromosome.
+
     Gets the reads with get_extension_sites
     makes a unique schmeckle string in /dev/shm with the SharedArray library
     Then gets bedgraph fields and stores them in the shared memory,
@@ -233,8 +232,7 @@ def worker(chrom):
     Returns the chrom and schmeckle so that the parent process
     knows which data to retrieve for this chrom.
     Precisely returns [chrom, smek1, smek2], smek1 and 2 cant be None
-    '''
-
+    """
     dp,dn = get_extension_sites(gargs,chrom)
     myuuid = uuid.uuid4()
     _extend = gargs.extsize
@@ -278,8 +276,11 @@ def worker(chrom):
     return ret
             
 def shm_to_pybw_manager(chrom, schmeckle, bwl, args):
-    '''Run by the manager process, reads data ffrom the shared memorry
-    puts them in the pybw object'''
+    """Organize the sharedMemory to bigwig.
+    
+    This is called by the 'manager' process, the one that makes the pool
+    and handles the results.
+    """
     smek1,smek2 = schmeckle
     if args.split_strands and len(bwl)==2:
         if smek1:
@@ -296,6 +297,7 @@ def shm_to_pybw_manager(chrom, schmeckle, bwl, args):
     return 0
 
 def shm_to_pybw(chrom, schmeckle, bw, largs):
+    """Read data from the shared memorry and put them in the pybw object."""
     try:
         sha_starts = sha.attach( schmeckle.format( "starts") )
         sha_ends = sha.attach( schmeckle.format( "ends") )
@@ -307,17 +309,21 @@ def shm_to_pybw(chrom, schmeckle, bw, largs):
         sha.delete( schmeckle.format( "starts") )
         sha.delete( schmeckle.format( "ends") )
         sha.delete( schmeckle.format( "values") )
-    except FileNotFoundError:
-        largs.vprint("fnf: {}".format(schmeckle.format( "{}")), file=sys.stderr)
-        pass
+    except OSError as e:
+        if e.errno == filenotfoundcode:
+            # do your FileNotFoundError code here
+            largs.vprint("I expected to find this but couldn't: {}".format(schmeckle.format( "{}")), file=sys.stderr)
+            pass
+        else:
+            raise
 
 def bamtobw(args):
-    '''The master process, 
-        Handles the pybiwwig object,
-        makes the pool
-        reads the results from the shared memory
-        puts them in the pybw object
-        then closes it'''
+    """The master process.
+
+    Handles the pybiwwig object, makes the pool, 
+    reads the results from the shared memory, puts them in the pybw object,
+    then closes it.
+    """
     if args.split_strands:
         bw_p = pyBigWig.open(args.bw_p_path, "w")
         bw_p.addHeader( sorted(list(args.chrom_size.items())), maxZooms=args.maxzooms)
@@ -330,28 +336,28 @@ def bamtobw(args):
         bw.addHeader( sorted(list(args.chrom_size.items())) , maxZooms=args.maxzooms)
         bwl = [bw]
             
-    CL = iter(sorted(args.chrom_size.keys()))       
+    chromosomelist = iter(sorted(args.chrom_size.keys()))       
     iterabull = iter(sorted(args.chrom_size.keys()))       
         
     pool = Pool(max(args.procs - 1,1), initializer=poolinit, initargs=(args, ))
     
     cache = {}
-    nextC = next(CL)
-    for donechrom,smek1,smek2 in pool.imap_unordered(worker, iterabull, chunksize=1) :
-        if donechrom == nextC:
+    next_chrom = next(chromosomelist)
+    for justdonechrom,smek1,smek2 in pool.imap_unordered(worker, iterabull, chunksize=1) :
+        if justdonechrom == next_chrom:
             #get results for chrom from shm and put in bw file 
-            shm_to_pybw_manager(donechrom, (smek1,smek2), bwl, args)
+            shm_to_pybw_manager(justdonechrom, (smek1,smek2), bwl, args)
             try:
-                nextC = next(CL)
-                while nextC in cache:
+                next_chrom = next(chromosomelist)
+                while next_chrom in cache:
                     # get results for chrom from shm and put in bw file
-                    shm_to_pybw_manager(nextC, cache[nextC], bwl, args)
-                    nextC = next(CL)
+                    shm_to_pybw_manager(next_chrom, cache[next_chrom], bwl, args)
+                    next_chrom = next(chromosomelist)
 
             except StopIteration:
                 pass
         else:
-            cache[donechrom] = smek1,smek2
+            cache[justdonechrom] = smek1,smek2
 
     pool.close()
     pool.join()
@@ -360,7 +366,10 @@ def bamtobw(args):
         bwfh.close()
 
 def main():
-
+    """The main function.
+    
+    Handles arguments, then calls bam2bigwig with them.
+    """
     parser = argparse.ArgumentParser(description="""
         Create a bigwig file with signal derived from a sorted and indexed bam file.  \
         Use the options to shape the signal according to what you are visualizing.    \
@@ -379,16 +388,16 @@ def main():
         """, add_help=False)
     req = parser.add_argument_group('rRequired arguments')
 
-    req.add_argument('-b', '--bam', nargs='+', type=str, metavar='', help='''
+    req.add_argument('-b', '--bam', nargs='+', type=str, metavar='', help="""
                        The input .bam file. Must be sorted and indexed.
                        You can give more than one input files, separated by space, or even 
-                       a wilcard expression, encased in quotation marks(e.g.,"./replicate*.bam"). ''')
+                       a wilcard expression, encased in quotation marks(e.g.,"./replicate*.bam"). """)
 
-    req.add_argument('-chr', '--chrominfo', type=str, metavar='', help='''
+    req.add_argument('-chr', '--chrominfo', type=str, metavar='', help="""
                        A two column |<chromosome name> <total_length>| txt file.
                        The chromosome names must match those on the bam file. bamToBigWig only 
                        works on the chromosomes found in this file, so if you want to create a bigwig with only 
-                       some chromosomes included, edit this input file accordingly.''')
+                       some chromosomes included, edit this input file accordingly.""")
 
     flt = parser.add_argument_group('Optional arguments - Filtering')
 
@@ -575,8 +584,8 @@ def main():
     # handle output path
     if not args.out:
         if len(args.bam)>1:
-            sys.exit('''\n\n    You have specified more than one input files but no output name (the -o option ).
-    Because of this I cannot decide what to call the output, please specify a name for it with -o.\n\n''')
+            sys.exit("""\n\n    You have specified more than one input files but no output name (the -o option ).
+    Because of this I cannot decide what to call the output, please specify a name for it with -o.\n\n""")
         else:
             args.out = args.bam[0][:-4] + ".bw"
             #vrb
@@ -605,7 +614,7 @@ def main():
     # extsize
     if "fragment" == args.extsize:
         if args.split_strands:
-            print('''\n\n   You have set both "fragment" type extension and "split_strands". \n\n''')
+            print("""\n\n   You have set both "fragment" type extension and "split_strands". \n\n""")
             sys.exit()
         pass
     else:
@@ -618,9 +627,9 @@ def main():
     # shifting
     if args.atac:
         if (args.shift_p != 0) or (args.shift_n != 0):
-            print('''\n\n   You seem to have set both a specific value for --shift_p or --shift_n
+            print("""\n\n   You seem to have set both a specific value for --shift_p or --shift_n
    AND the -atac flag. The atac flag overrides the other two values so please
-   use either shift_n/shift_p OR -atac/ \n\n''')
+   use either shift_n/shift_p OR -atac/ \n\n""")
             sys.exit()
 
         args.shift_p = 4
@@ -639,15 +648,20 @@ def main():
     args.vprint("Arguments: ", file=sys.stdout)
     args.vprint("", file=sys.stdout)
     args.vprint("chromInfo file: \t {}".format(args.chrominfo), file=sys.stdout)
-    args.vprint("ATAC mode: \t {}".format("True" if args.atac else "False"), file=sys.stdout)
-    args.vprint("Split strands: \t {}".format("True" if args.split_strands else "False"), file=sys.stdout)
+    args.vprint("ATAC mode: \t {}".format("True" if args.atac else "False"), 
+        file=sys.stdout)
+    args.vprint(("Split strands: \t {}"
+        .format("True" if args.split_strands else "False")), file=sys.stdout)
     args.vprint("Processors to use: \t {}".format(args.procs), file=sys.stdout)
     args.vprint("BigWig maxZooms: \t {}".format(args.maxzooms), file=sys.stdout)
     args.vprint("", file=sys.stdout)
     # args.vprint("{} ".format(args.shm_backend), file=sys.stdout)
-    args.vprint("Mapping Quality lower limit: \t {}".format(args.q), file=sys.stdout)
-    args.vprint("Fragment Length uper limit: \t {}".format(args.t_len_upper), file=sys.stdout)
-    args.vprint("Fragment Length lower limit: \t {}".format(args.t_len_lower), file=sys.stdout)
+    args.vprint("Mapping Quality lower limit: \t {}".format(args.q), 
+        file=sys.stdout)
+    args.vprint("Fragment Length uper limit: \t {}".format(args.t_len_upper), 
+        file=sys.stdout)
+    args.vprint("Fragment Length lower limit: \t {}".format(args.t_len_lower), 
+        file=sys.stdout)
     args.vprint("-f flag: \t {}".format(args.filter_lc), file=sys.stdout)
     args.vprint("-F flag: \t {}".format(args.filter_uc), file=sys.stdout)
     args.vprint("", file=sys.stdout)
